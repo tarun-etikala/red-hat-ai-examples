@@ -1,6 +1,6 @@
 ![Red Hat AI Examples Logo](assets/RHAI-logo.png)
 
-# Red Hat AI Examples
+# Red Hat AI Examples - check
 
 This repository provides example notebooks and flows to help users get started with AI and machine learning on Red Hat platforms. It is supported by a library of tools that can be packaged to simplify usage and accelerate development.
 
