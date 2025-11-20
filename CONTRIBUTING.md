@@ -48,6 +48,7 @@ The pre-commit hooks will automatically run on every commit to check:
 - Markdown linting
 - Secret scanning (Gitleaks, Talisman, and detect-secrets)
 - General file quality (trailing whitespace, YAML syntax, etc.)
+- Removal of Jupyter notebook outputs before commit (nbstripout)
 
 See [.pre-commit-config.yaml](.pre-commit-config.yaml) for the complete configuration.
 
@@ -102,6 +103,7 @@ All contributions must pass the automated code quality checks before being merge
 - Python code must be formatted with Ruff
 - Python code must pass Ruff linting checks
 - Markdown files must follow markdownlint rules
+- Jupyter notebooks must be committed without outputs
 - No secrets or sensitive information should be committed
 - No trailing whitespace or other common file issues
 
