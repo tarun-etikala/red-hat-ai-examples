@@ -1,0 +1,126 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "red-hat-ai-examples"
+version = "0.1.0"
+description = "Red Hat AI Examples - Sample notebooks and workflows for AI/ML on Red Hat platforms"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Red Hat AI Team"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+# Optional dependencies for testing
+[project.optional-dependencies]
+test = [
+    # Core testing framework
+    "pytest>=8.0.0",
+    "pytest-timeout>=2.2.0",
+    "pytest-xdist>=3.5.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12.0",
+
+    # Notebook testing
+    "papermill>=2.5.0",
+    "nbformat>=5.9.0",
+    "nbconvert>=7.14.0",
+    "jupyter>=1.0.0",
+    "ipykernel>=6.29.0",
+
+    # KFP/Pipeline testing
+    "kfp>=2.0.0",
+    "kfp-kubernetes>=1.0.0",
+
+    # Data and configuration
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+
+    # Mocking and utilities
+    "responses>=0.24.0",
+    "faker>=22.0.0",
+]
+
+# Development dependencies
+dev = [
+    "ruff>=0.14.4",
+    "pre-commit>=3.5.0",
+]
+
+# All dependencies (test + dev)
+all = [
+    "red-hat-ai-examples[test,dev]",
+]
+
+[tool.setuptools]
+packages = []
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.yml", "*.json", "*.md"]
+
+# Ruff configuration (already exists in ruff.toml, but included here for completeness)
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "W", "UP"]
+ignore = ["E203", "E501", "UP006", "UP007", "UP035", "UP045", "B006"]
+
+# Coverage configuration
+[tool.coverage.run]
+source = ["examples"]
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+# Pytest configuration (mirrors pytest.ini for tools that prefer pyproject.toml)
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+markers = [
+    "unit: Unit tests for utility functions and modules",
+    "integration: Integration tests for dependencies and data formats",
+    "e2e: End-to-end tests for complete workflows",
+    "notebook: Notebook validation tests",
+    "gpu: Tests that require GPU availability",
+    "slow: Tests that take longer than 60 seconds",
+    "rhoai: Tests that require Red Hat OpenShift AI platform",
+    "kfp: Tests that require Kubeflow Pipelines",
+    "requires_model: Tests that require model downloads",
+    "requires_data: Tests that require dataset downloads",
+]

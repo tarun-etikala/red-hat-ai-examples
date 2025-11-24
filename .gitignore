@@ -179,3 +179,10 @@ cython_debug/
 # Code quality and security tools
 .ruff_cache/
 .talisman_reports/
+
+# Test artifacts and outputs
+tests/fixtures/executed_notebooks/
+*.junit.xml
+.pytest_cache/
+test-results/
+test-reports/

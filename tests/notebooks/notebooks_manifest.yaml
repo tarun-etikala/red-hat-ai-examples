@@ -1,0 +1,168 @@
+# Manifest of all notebooks to be tested
+# This file is used by test_notebook_validation.py to discover and configure notebook tests
+
+notebooks:
+  # LLMCompressor Example
+  - path: examples/llmcompressor/workbench_example.ipynb
+    name: llmcompressor_workbench
+    description: LLM compression and optimization example
+    requires_gpu: false
+    timeout: 300
+    env_vars: []
+    tags:
+      - llmcompressor
+      - vllm
+      - model-compression
+    skip: false
+    skip_reason: null
+
+  # Fine-tuning: OSFT
+  - path: examples/fine-tuning/osft/osft-example.ipynb
+    name: osft_fine_tuning
+    description: Orthogonal Subspace Fine-Tuning example
+    requires_gpu: true
+    timeout: 1800
+    env_vars:
+      - MODEL_NAME
+      - DATASET_PATH
+    tags:
+      - fine-tuning
+      - osft
+      - distributed-training
+    skip: true
+    skip_reason: Requires GPU and distributed setup with 2 nodes
+
+  # Fine-tuning: Training Hub SFT
+  - path: examples/fine-tuning/training-hub/sft/sft.ipynb
+    name: training_hub_sft
+    description: Supervised Fine-Tuning with Training Hub
+    requires_gpu: true
+    timeout: 1800
+    env_vars:
+      - MODEL_NAME
+      - DATASET_PATH
+    tags:
+      - fine-tuning
+      - sft
+      - training-hub
+      - kubeflow
+    skip: true
+    skip_reason: Requires GPU and Kubeflow Training operator on RHOAI
+
+  # Knowledge Tuning: Step 01
+  - path: examples/knowledge-tuning/01_Base_Model_Evaluation/Base_Model_Evaluation.ipynb
+    name: knowledge_tuning_01_base_eval
+    description: "Knowledge Tuning Step 1: Base Model Evaluation"
+    requires_gpu: false
+    timeout: 600
+    env_vars:
+      - MODEL_NAME
+    tags:
+      - knowledge-tuning
+      - evaluation
+      - step-01
+    skip: false
+    skip_reason: null
+
+  # Knowledge Tuning: Step 02
+  - path: examples/knowledge-tuning/02_Data_Processing/Data_Processing.ipynb
+    name: knowledge_tuning_02_data_processing
+    description: "Knowledge Tuning Step 2: Data Processing"
+    requires_gpu: false
+    timeout: 600
+    env_vars:
+      - DATA_URL
+    tags:
+      - knowledge-tuning
+      - data-processing
+      - step-02
+    skip: false
+    skip_reason: null
+
+  # Knowledge Tuning: Step 03
+  - path: examples/knowledge-tuning/03_Knowledge_Generation/Knowledge_Generation.ipynb
+    name: knowledge_tuning_03_knowledge_gen
+    description: "Knowledge Tuning Step 3: Knowledge Generation"
+    requires_gpu: false
+    timeout: 1200
+    env_vars:
+      - TEACHER_MODEL
+      - DATASET_PATH
+    tags:
+      - knowledge-tuning
+      - sdg
+      - step-03
+    skip: false
+    skip_reason: null
+
+  # Knowledge Tuning: Step 04
+  - path: examples/knowledge-tuning/04_Knowledge_Mixing/Knowledge_Mixing.ipynb
+    name: knowledge_tuning_04_knowledge_mixing
+    description: "Knowledge Tuning Step 4: Knowledge Mixing"
+    requires_gpu: false
+    timeout: 600
+    env_vars:
+      - DATASET_PATH
+    tags:
+      - knowledge-tuning
+      - data-mixing
+      - step-04
+    skip: false
+    skip_reason: null
+
+  # Knowledge Tuning: Step 05
+  - path: examples/knowledge-tuning/05_Model_Training/Model_Training.ipynb
+    name: knowledge_tuning_05_training
+    description: "Knowledge Tuning Step 5: Model Training"
+    requires_gpu: true
+    timeout: 1800
+    env_vars:
+      - MODEL_NAME
+      - DATASET_PATH
+    tags:
+      - knowledge-tuning
+      - training
+      - step-05
+    skip: true
+    skip_reason: Requires GPU for model training
+
+  # Knowledge Tuning: Step 06
+  - path: examples/knowledge-tuning/06_Evaluation/Evaluation.ipynb
+    name: knowledge_tuning_06_evaluation
+    description: "Knowledge Tuning Step 6: Evaluation"
+    requires_gpu: false
+    timeout: 600
+    env_vars:
+      - MODEL_PATH
+    tags:
+      - knowledge-tuning
+      - evaluation
+      - step-06
+    skip: false
+    skip_reason: null
+
+# Test execution settings
+settings:
+  # Default timeout for all notebooks (can be overridden per notebook)
+  default_timeout: 300
+
+  # Whether to fail on first error or continue testing all notebooks
+  fail_fast: false
+
+  # Whether to save notebook outputs after execution
+  save_outputs: true
+
+  # Directory to save executed notebooks
+  output_dir: tests/fixtures/executed_notebooks
+
+  # Whether to clean up executed notebooks after tests
+  cleanup_outputs: false
+
+  # Kernel name to use for execution
+  kernel_name: python3
+
+  # Whether to allow errors in notebook execution (for testing error handling)
+  allow_errors: false
+
+  # Maximum number of notebooks to test in parallel
+  max_parallel: 2
