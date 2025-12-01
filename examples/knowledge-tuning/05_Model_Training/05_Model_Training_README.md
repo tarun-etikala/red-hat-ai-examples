@@ -29,7 +29,7 @@ Ihe notebook in this module demonstrates how to fine-tune a student model by usi
 
 ### Procedure
 
-- In JupyterLab, open the [Model_Training.ipynb](./Model_Training.ipynb) file and follow the notebook instructions or run your training script/entrypoint.
+- In JupyterLab, open the [Model_Training.ipynb](./Model_Training.ipynb) file and follow the notebook instructions.
 
 ### Verification
 

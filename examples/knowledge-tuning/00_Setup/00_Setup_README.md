@@ -24,11 +24,7 @@ For this example, you create an OpenShift project and a workbench. From the work
 
 ## Configure resources on the OpenShift cluster
 
-The notebooks provided in the Knowledge Tuning example require the following resources:
-
-- **GPUs:** GPUs are optional for the data processing and mixing steps. For the model training step, fine-tuning large models requires at least one NVIDIA A100/40GB or similar. Training smaller student models requires 8–16 GB GPU.
-
-- **Persistent Volumes:** Attach a persistent volume with at least 200 GB.
+In the Knowledge Tuning example, GPUs are optional for the data processing and mixing notebooks. For the model training notebook, fine-tuning large models requires at least one NVIDIA A100/40GB or similar. Training smaller student models requires 8–16 GB GPU.
 
 To run all of the notebooks in the Knowledge Tuning example, you must ensure that the following resources are configured on the OpenShift cluster:
 
