@@ -55,8 +55,34 @@ def check_dependencies():
     print("✅ Core dependencies available")
 
 
+def parse_pyproject_dependencies(pyproject_path: Path) -> list:
+    """Parse dependencies from pyproject.toml file."""
+    try:
+        # Try tomllib (Python 3.11+) or tomli
+        try:
+            import tomllib
+        except ImportError:
+            try:
+                import tomli as tomllib
+            except ImportError:
+                return []
+
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+
+        # Get dependencies from [project.dependencies]
+        deps = data.get("project", {}).get("dependencies", [])
+        return deps
+    except Exception:
+        return []
+
+
 def install_notebook_dependencies(notebook_dir: Path) -> bool:
-    """Install dependencies from pyproject.toml in the notebook directory."""
+    """Install dependencies from pyproject.toml in the notebook directory.
+
+    This function extracts dependencies from pyproject.toml and installs them
+    directly with pip, bypassing Python version constraints in the project metadata.
+    """
     pyproject_path = notebook_dir / "pyproject.toml"
 
     if not pyproject_path.exists():
@@ -65,30 +91,30 @@ def install_notebook_dependencies(notebook_dir: Path) -> bool:
 
     print(f"   📦 Installing dependencies from {notebook_dir.name}/pyproject.toml...")
 
+    # Parse dependencies from pyproject.toml
+    deps = parse_pyproject_dependencies(pyproject_path)
+
+    if not deps:
+        print(f"   ⚠️ No dependencies found in {notebook_dir.name}/pyproject.toml")
+        return True
+
+    print(f"   📋 Dependencies: {', '.join(deps[:5])}{'...' if len(deps) > 5 else ''}")
+
     try:
-        # Install the package in the notebook directory
+        # Install dependencies directly, bypassing Python version constraints
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "-e", str(notebook_dir)],
+            [sys.executable, "-m", "pip", "install", "-q"] + deps,
             capture_output=True,
             text=True,
-            timeout=300,  # 5 minute timeout
+            timeout=600,  # 10 minute timeout for large packages
         )
-
-        if result.returncode != 0:
-            # Try alternative: install from pyproject.toml directly
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-q", str(notebook_dir)],
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
 
         if result.returncode == 0:
             print(f"   ✅ Dependencies installed for {notebook_dir.name}")
             return True
         else:
-            print(f"   ⚠️ Dependency install had issues: {result.stderr[:200]}")
-            # Continue anyway - some deps might already be installed
+            # Some packages might fail, but continue anyway
+            print(f"   ⚠️ Some dependencies had issues: {result.stderr[:300]}")
             return True
 
     except subprocess.TimeoutExpired:

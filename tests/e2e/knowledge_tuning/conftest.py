@@ -162,8 +162,34 @@ def e2e_workspace(
             os.environ.pop(key, None)
 
 
+def parse_pyproject_dependencies(pyproject_path: Path) -> list:
+    """Parse dependencies from pyproject.toml file."""
+    try:
+        # Try tomllib (Python 3.11+) or tomli
+        try:
+            import tomllib
+        except ImportError:
+            try:
+                import tomli as tomllib
+            except ImportError:
+                return []
+
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+
+        # Get dependencies from [project.dependencies]
+        deps = data.get("project", {}).get("dependencies", [])
+        return deps
+    except Exception:
+        return []
+
+
 def install_notebook_dependencies(notebook_dir: Path) -> bool:
-    """Install dependencies from pyproject.toml in the notebook directory."""
+    """Install dependencies from pyproject.toml in the notebook directory.
+
+    This function extracts dependencies and installs them directly with pip,
+    bypassing Python version constraints in the project metadata.
+    """
     import subprocess
     import sys
 
@@ -172,12 +198,16 @@ def install_notebook_dependencies(notebook_dir: Path) -> bool:
     if not pyproject_path.exists():
         return True
 
+    deps = parse_pyproject_dependencies(pyproject_path)
+    if not deps:
+        return True
+
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", str(notebook_dir)],
+            [sys.executable, "-m", "pip", "install", "-q"] + deps,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=600,
         )
         return result.returncode == 0
     except Exception:
