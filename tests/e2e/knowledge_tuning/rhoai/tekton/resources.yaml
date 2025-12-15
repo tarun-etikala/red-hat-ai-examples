@@ -1,0 +1,89 @@
+# =============================================================================
+# Tekton Resources: Namespace, PVCs, ServiceAccount
+# =============================================================================
+# Prerequisites for running the E2E Tekton Pipeline
+# =============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: e2e-tests
+  labels:
+    app.kubernetes.io/name: e2e-tests
+---
+# PVC for shared data between pipeline steps
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: e2e-shared-data
+  namespace: e2e-tests
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+---
+# PVC for executed notebooks
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: e2e-output-notebooks
+  namespace: e2e-tests
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Service account for pipeline execution
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: e2e-pipeline-sa
+  namespace: e2e-tests
+---
+# Role for pipeline operations
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: e2e-pipeline-role
+  namespace: e2e-tests
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns", "taskruns"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+# Bind role to service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: e2e-pipeline-rolebinding
+  namespace: e2e-tests
+subjects:
+  - kind: ServiceAccount
+    name: e2e-pipeline-sa
+    namespace: e2e-tests
+roleRef:
+  kind: Role
+  name: e2e-pipeline-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Allow anyuid for CUDA containers
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: e2e-anyuid
+  namespace: e2e-tests
+subjects:
+  - kind: ServiceAccount
+    name: e2e-pipeline-sa
+    namespace: e2e-tests
+roleRef:
+  kind: ClusterRole
+  name: system:openshift:scc:anyuid
+  apiGroup: rbac.authorization.k8s.io
