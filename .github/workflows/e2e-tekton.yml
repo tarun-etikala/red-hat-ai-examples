@@ -2,11 +2,9 @@ name: E2E Tests via Tekton on RHOAI
 
 # =============================================================================
 # This workflow triggers E2E tests using Tekton Pipelines on RHOAI.
-# Benefits over K8s Job approach:
-# - Step isolation (each notebook in separate Pod)
-# - Built-in retry per step
-# - Better resource management
-# - Tekton Dashboard visibility
+# Two modes available:
+# - Single Pod (default): Fast startup, simple debugging, all steps in one Pod
+# - Multi Pod: Step isolation, per-step retry, separate Pod per notebook
 # =============================================================================
 
 on:
@@ -22,6 +20,14 @@ on:
           - minimal
           - standard
           - extended
+      mode:
+        description: 'Execution mode'
+        required: true
+        default: 'single-pod'
+        type: choice
+        options:
+          - single-pod
+          - multi-pod
       skip_steps:
         description: 'Steps to skip (comma-separated, e.g., "1,5,6")'
         required: false
@@ -33,13 +39,12 @@ on:
         default: 'main'
         type: string
 
-  # Weekly scheduled run
+  # Weekly scheduled run (uses single-pod mode)
   schedule:
     - cron: '0 3 * * 0'  # Sundays at 3 AM UTC
 
 env:
   OPENSHIFT_NAMESPACE: e2e-tests
-  PIPELINE_NAME: e2e-knowledge-tuning
 
 jobs:
   # ==========================================================================
@@ -50,6 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       resources_ready: ${{ steps.check.outputs.ready }}
+      pipeline_name: ${{ steps.check.outputs.pipeline_name }}
 
     steps:
       - name: Checkout code
@@ -77,14 +83,20 @@ jobs:
         run: |
           echo "📦 Applying Tekton resources..."
 
-          # Apply resources (PVCs, ServiceAccount)
+          MODE="${{ github.event.inputs.mode || 'single-pod' }}"
+
+          # Apply common resources (PVCs, ServiceAccount)
           oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/resources.yaml
 
-          # Apply Task
-          oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/task-notebook-runner.yaml
-
-          # Apply Pipeline
-          oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/pipeline-e2e.yaml
+          if [ "$MODE" == "single-pod" ]; then
+            echo "📦 Applying single-pod Task and Pipeline..."
+            oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/task-e2e-single-pod.yaml
+            oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/pipeline-single-pod.yaml
+          else
+            echo "📦 Applying multi-pod Task and Pipeline..."
+            oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/task-notebook-runner.yaml
+            oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/pipeline-e2e.yaml
+          fi
 
           echo "✅ Tekton resources applied"
 
@@ -93,17 +105,28 @@ jobs:
         run: |
           echo "🔍 Verifying Tekton resources..."
 
+          MODE="${{ github.event.inputs.mode || 'single-pod' }}"
+
+          if [ "$MODE" == "single-pod" ]; then
+            PIPELINE_NAME="e2e-knowledge-tuning-single-pod"
+            TASK_NAME="e2e-knowledge-tuning-single-pod"
+          else
+            PIPELINE_NAME="e2e-knowledge-tuning"
+            TASK_NAME="notebook-runner"
+          fi
+
           # Check Pipeline exists
-          oc get pipeline ${{ env.PIPELINE_NAME }} -n ${{ env.OPENSHIFT_NAMESPACE }}
+          oc get pipeline $PIPELINE_NAME -n ${{ env.OPENSHIFT_NAMESPACE }}
 
           # Check Task exists
-          oc get task notebook-runner -n ${{ env.OPENSHIFT_NAMESPACE }}
+          oc get task $TASK_NAME -n ${{ env.OPENSHIFT_NAMESPACE }}
 
           # Check PVCs
           oc get pvc -n ${{ env.OPENSHIFT_NAMESPACE }}
 
+          echo "pipeline_name=$PIPELINE_NAME" >> $GITHUB_OUTPUT
           echo "ready=true" >> $GITHUB_OUTPUT
-          echo "✅ All resources ready"
+          echo "✅ All resources ready (mode: $MODE)"
 
   # ==========================================================================
   # Job 2: Trigger Tekton Pipeline
@@ -174,10 +197,16 @@ jobs:
         id: trigger
         run: |
           PIPELINERUN_NAME="e2e-run-${{ github.run_id }}-${{ github.run_attempt }}"
+          PIPELINE_NAME="${{ needs.setup-tekton.outputs.pipeline_name }}"
+          MODE="${{ github.event.inputs.mode || 'single-pod' }}"
 
           echo "🚀 Creating PipelineRun: $PIPELINERUN_NAME"
+          echo "   Pipeline: $PIPELINE_NAME"
+          echo "   Mode: $MODE"
 
-          cat <<EOF | oc apply -f -
+          # Single-pod mode doesn't use workspaces (uses emptyDir internally)
+          if [ "$MODE" == "single-pod" ]; then
+            cat <<EOF | oc apply -f -
           apiVersion: tekton.dev/v1beta1
           kind: PipelineRun
           metadata:
@@ -186,10 +215,49 @@ jobs:
             labels:
               app: e2e-tests
               trigger: github-actions
+              mode: single-pod
               github-run-id: "${{ github.run_id }}"
           spec:
             pipelineRef:
-              name: ${{ env.PIPELINE_NAME }}
+              name: ${PIPELINE_NAME}
+            serviceAccountName: e2e-pipeline-sa
+            params:
+              - name: git-url
+                value: "https://github.com/${{ github.repository }}.git"
+              - name: git-revision
+                value: "${{ steps.params.outputs.git_branch }}"
+              - name: test-profile
+                value: "${{ steps.params.outputs.profile }}"
+              - name: student-model
+                value: "${{ steps.params.outputs.model }}"
+              - name: teacher-model
+                value: "${{ steps.params.outputs.model }}"
+              - name: skip-steps
+                value: "${{ steps.params.outputs.skip_steps }}"
+            podTemplate:
+              tolerations:
+                - key: "nvidia.com/gpu"
+                  operator: "Exists"
+                  effect: "NoSchedule"
+              nodeSelector:
+                nvidia.com/gpu.present: "true"
+          EOF
+          else
+            # Multi-pod mode uses PVC workspaces
+            cat <<EOF | oc apply -f -
+          apiVersion: tekton.dev/v1beta1
+          kind: PipelineRun
+          metadata:
+            name: ${PIPELINERUN_NAME}
+            namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+            labels:
+              app: e2e-tests
+              trigger: github-actions
+              mode: multi-pod
+              github-run-id: "${{ github.run_id }}"
+          spec:
+            pipelineRef:
+              name: ${PIPELINE_NAME}
             serviceAccountName: e2e-pipeline-sa
             params:
               - name: git-url
@@ -219,17 +287,20 @@ jobs:
               nodeSelector:
                 nvidia.com/gpu.present: "true"
           EOF
+          fi
 
           echo "pipelinerun_name=$PIPELINERUN_NAME" >> $GITHUB_OUTPUT
           echo "✅ PipelineRun created"
 
       - name: Generate summary
         run: |
+          MODE="${{ github.event.inputs.mode || 'single-pod' }}"
           echo "## Tekton Pipeline Triggered" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| PipelineRun | \`${{ steps.trigger.outputs.pipelinerun_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Mode | $MODE |" >> $GITHUB_STEP_SUMMARY
           echo "| Profile | ${{ steps.params.outputs.profile }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Model | ${{ steps.params.outputs.model }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Branch | ${{ steps.params.outputs.git_branch }} |" >> $GITHUB_STEP_SUMMARY

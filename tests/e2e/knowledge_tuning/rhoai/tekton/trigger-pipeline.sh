@@ -13,6 +13,7 @@ GIT_BRANCH="main"
 GIT_URL="https://github.com/red-hat-data-services/red-hat-ai-examples.git"
 SKIP_STEPS=""
 NAMESPACE="e2e-tests"
+MODE="single-pod"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -33,11 +34,16 @@ while [[ $# -gt 0 ]]; do
       NAMESPACE="$2"
       shift 2
       ;;
+    --mode)
+      MODE="$2"
+      shift 2
+      ;;
     --help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
       echo "Options:"
       echo "  --profile <minimal|standard|extended>  Test profile (default: minimal)"
+      echo "  --mode <single-pod|multi-pod>          Execution mode (default: single-pod)"
       echo "  --branch <branch>                      Git branch to test (default: main)"
       echo "  --skip <steps>                         Steps to skip, comma-separated (e.g., '1,5,6')"
       echo "  --namespace <ns>                       Kubernetes namespace (default: e2e-tests)"
@@ -68,12 +74,20 @@ case $PROFILE in
     ;;
 esac
 
+# Set pipeline name based on mode
+if [ "$MODE" == "single-pod" ]; then
+  PIPELINE_NAME="e2e-knowledge-tuning-single-pod"
+else
+  PIPELINE_NAME="e2e-knowledge-tuning"
+fi
+
 # Generate unique run name
 RUN_NAME="e2e-manual-$(date +%Y%m%d-%H%M%S)"
 
 echo "🚀 Triggering E2E Tekton Pipeline"
 echo "=================================="
 echo "   Name:    $RUN_NAME"
+echo "   Mode:    $MODE"
 echo "   Profile: $PROFILE"
 echo "   Model:   $MODEL"
 echo "   Branch:  $GIT_BRANCH"
@@ -86,18 +100,24 @@ if ! oc whoami > /dev/null 2>&1; then
   exit 1
 fi
 
-# Check if Tekton resources exist
-if ! oc get pipeline e2e-knowledge-tuning -n "$NAMESPACE" > /dev/null 2>&1; then
-  echo "⚠️ Pipeline not found. Applying resources..."
-  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-  oc apply -f "$SCRIPT_DIR/resources.yaml"
+# Apply Tekton resources
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "📦 Applying Tekton resources..."
+oc apply -f "$SCRIPT_DIR/resources.yaml"
+
+if [ "$MODE" == "single-pod" ]; then
+  oc apply -f "$SCRIPT_DIR/task-e2e-single-pod.yaml"
+  oc apply -f "$SCRIPT_DIR/pipeline-single-pod.yaml"
+else
   oc apply -f "$SCRIPT_DIR/task-notebook-runner.yaml"
   oc apply -f "$SCRIPT_DIR/pipeline-e2e.yaml"
-  echo "✅ Resources applied"
 fi
+echo "✅ Resources applied"
 
 # Create PipelineRun
-cat <<EOF | oc apply -f -
+if [ "$MODE" == "single-pod" ]; then
+  # Single-pod mode (no workspaces needed)
+  cat <<EOF | oc apply -f -
 apiVersion: tekton.dev/v1beta1
 kind: PipelineRun
 metadata:
@@ -106,9 +126,47 @@ metadata:
   labels:
     app: e2e-tests
     trigger: manual
+    mode: single-pod
 spec:
   pipelineRef:
-    name: e2e-knowledge-tuning
+    name: ${PIPELINE_NAME}
+  serviceAccountName: e2e-pipeline-sa
+  params:
+    - name: git-url
+      value: "${GIT_URL}"
+    - name: git-revision
+      value: "${GIT_BRANCH}"
+    - name: test-profile
+      value: "${PROFILE}"
+    - name: student-model
+      value: "${MODEL}"
+    - name: teacher-model
+      value: "${MODEL}"
+    - name: skip-steps
+      value: "${SKIP_STEPS}"
+  podTemplate:
+    tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
+EOF
+else
+  # Multi-pod mode (uses PVC workspaces)
+  cat <<EOF | oc apply -f -
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  name: ${RUN_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: e2e-tests
+    trigger: manual
+    mode: multi-pod
+spec:
+  pipelineRef:
+    name: ${PIPELINE_NAME}
   serviceAccountName: e2e-pipeline-sa
   params:
     - name: git-url
@@ -138,6 +196,7 @@ spec:
     nodeSelector:
       nvidia.com/gpu.present: "true"
 EOF
+fi
 
 echo ""
 echo "✅ PipelineRun created: $RUN_NAME"

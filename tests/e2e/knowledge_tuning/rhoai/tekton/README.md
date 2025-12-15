@@ -1,51 +1,61 @@
 # Tekton-based E2E Testing for Knowledge-Tuning
 
-This directory contains Tekton Pipeline resources for running E2E tests on RHOAI with step isolation and built-in retry capabilities.
+This directory contains Tekton Pipeline resources for running E2E tests on RHOAI with Tekton Dashboard visibility and built-in retry capabilities.
 
-## Architecture
+## Two Execution Modes
+
+### Single-Pod Mode (Default, Recommended)
+
+All 6 notebooks run in a **single Pod** with step-by-step visibility:
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Tekton Pipeline                                      │
+│                    Single Pod (Tekton Task)                                  │
 ├─────────────────────────────────────────────────────────────────────────────┤
+│  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐   │
+│  │ Step 1 │─▶│ Step 2 │─▶│ Step 3 │─▶│ Step 4 │─▶│ Step 5 │─▶│ Step 6 │   │
+│  └────────┘  └────────┘  └────────┘  └────────┘  └────────┘  └────────┘   │
 │                                                                              │
-│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐     │
-│  │   Step 1    │   │   Step 2    │   │   Step 3    │   │   Step 4    │     │
-│  │   (Pod 1)   │──▶│   (Pod 2)   │──▶│   (Pod 3)   │──▶│   (Pod 4)   │──▶  │
-│  │             │   │             │   │             │   │             │     │
-│  │ Base Model  │   │    Data     │   │ Knowledge   │   │ Knowledge   │     │
-│  │ Evaluation  │   │ Processing  │   │ Generation  │   │   Mixing    │     │
-│  └─────────────┘   └─────────────┘   └─────────────┘   └─────────────┘     │
-│                                                                              │
-│  ┌─────────────┐   ┌─────────────┐                                          │
-│  │   Step 5    │   │   Step 6    │    Shared PVC for data/outputs           │
-│  │   (Pod 5)   │──▶│   (Pod 6)   │    ━━━━━━━━━━━━━━━━━━━━━━━━━━━           │
-│  │             │   │             │                                          │
-│  │   Model     │   │ Evaluation  │    Each Pod has:                         │
-│  │  Training   │   │             │    • GPU access                          │
-│  └─────────────┘   └─────────────┘    • Retry capability                    │
-│                                       • Isolated dependencies               │
+│  ✅ Fast startup (single Pod)          ✅ Tekton Dashboard visibility        │
+│  ✅ Simple debugging (one log stream)  ✅ Built-in retry at Task level       │
+│  ✅ Shared GPU/filesystem              ✅ No PVC required                    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Benefits over K8s Job Approach
+### Multi-Pod Mode (Optional)
 
-| Feature | K8s Job | Tekton Pipeline |
-|---------|---------|-----------------|
-| Step isolation | ❌ Single container | ✅ Separate Pods |
-| Retry per step | ❌ Manual | ✅ Built-in |
-| Resource cleanup | ❌ Manual | ✅ Automatic |
-| Progress visibility | ❌ Logs only | ✅ Tekton Dashboard |
-| Parallel steps | ❌ No | ✅ Supported |
-| Artifact passing | ❌ Manual | ✅ Workspaces |
+Each notebook runs in a **separate Pod** for step isolation:
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐       │
+│  │  Pod 1  │──▶│  Pod 2  │──▶│  Pod 3  │──▶│  Pod 4  │──▶│  Pod 5  │──▶ 6  │
+│  └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘       │
+│        ↓           ↓             ↓             ↓             ↓              │
+│   ═══════════════ Shared PVC for data/outputs ═══════════════════          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Mode Comparison
+
+| Feature | Single-Pod | Multi-Pod |
+|---------|------------|-----------|
+| Startup time | ✅ Fast | ❌ Slower (Pod per step) |
+| Debugging | ✅ Simple | ❌ Multiple logs |
+| Step retry | ✅ Task level | ✅ Per-step |
+| Dashboard visibility | ✅ Yes | ✅ Yes |
+| Step isolation | ❌ Shared | ✅ Isolated |
+| PVC required | ❌ No | ✅ Yes |
 
 ## Files
 
 | File | Description |
 |------|-------------|
 | `resources.yaml` | Namespace, PVCs, ServiceAccount |
-| `task-notebook-runner.yaml` | Reusable Task for running notebooks |
-| `pipeline-e2e.yaml` | Pipeline that chains all 6 steps |
+| `task-e2e-single-pod.yaml` | Single-pod Task (all steps in one Pod) |
+| `pipeline-single-pod.yaml` | Pipeline wrapper for single-pod mode |
+| `task-notebook-runner.yaml` | Multi-pod Task (one notebook per call) |
+| `pipeline-e2e.yaml` | Multi-pod Pipeline (6 TaskRuns) |
 
 ## Prerequisites
 
@@ -60,19 +70,37 @@ This directory contains Tekton Pipeline resources for running E2E tests on RHOAI
 ### Option 1: Via GitHub Actions
 
 ```bash
-# Trigger via GitHub CLI
+# Single-pod mode (default, recommended)
 gh workflow run e2e-tekton.yml \
   -f profile=minimal \
-  -f git_branch=main
+  -f mode=single-pod
+
+# Multi-pod mode (step isolation)
+gh workflow run e2e-tekton.yml \
+  -f profile=minimal \
+  -f mode=multi-pod
 ```
 
-### Option 2: Manual Setup on RHOAI
+### Option 2: Using trigger script
 
 ```bash
-# 1. Apply resources
+# Single-pod mode (default)
+./trigger-pipeline.sh --profile minimal
+
+# Multi-pod mode
+./trigger-pipeline.sh --profile minimal --mode multi-pod
+
+# With options
+./trigger-pipeline.sh --profile standard --branch feature-branch --skip "1,6"
+```
+
+### Option 3: Manual Setup on RHOAI
+
+```bash
+# 1. Apply resources (single-pod mode)
 oc apply -f resources.yaml
-oc apply -f task-notebook-runner.yaml
-oc apply -f pipeline-e2e.yaml
+oc apply -f task-e2e-single-pod.yaml
+oc apply -f pipeline-single-pod.yaml
 
 # 2. Start a PipelineRun
 cat <<EOF | oc apply -f -
@@ -83,18 +111,18 @@ metadata:
   namespace: e2e-tests
 spec:
   pipelineRef:
-    name: e2e-knowledge-tuning
+    name: e2e-knowledge-tuning-single-pod
   serviceAccountName: e2e-pipeline-sa
   params:
     - name: test-profile
       value: "minimal"
-  workspaces:
-    - name: shared-data
-      persistentVolumeClaim:
-        claimName: e2e-shared-data
-    - name: output-notebooks
-      persistentVolumeClaim:
-        claimName: e2e-output-notebooks
+  podTemplate:
+    tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
 EOF
 
 # 3. Watch progress
