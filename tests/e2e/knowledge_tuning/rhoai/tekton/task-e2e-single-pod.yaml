@@ -1,0 +1,451 @@
+# =============================================================================
+# Tekton Task: E2E Knowledge-Tuning (Single Pod)
+# =============================================================================
+# Runs all 6 notebooks in a SINGLE Pod with step-by-step visibility.
+# Benefits: Fast startup, simple debugging, Tekton Dashboard visibility.
+# =============================================================================
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: e2e-knowledge-tuning-single-pod
+  namespace: e2e-tests
+  labels:
+    app.kubernetes.io/name: e2e-tests
+    app.kubernetes.io/component: e2e-runner
+spec:
+  description: |
+    Executes the complete knowledge-tuning E2E workflow in a single Pod.
+    All 6 notebooks run sequentially with shared filesystem and GPU.
+
+  params:
+    - name: git-url
+      type: string
+      description: "Git repository URL"
+      default: "https://github.com/red-hat-data-services/red-hat-ai-examples.git"
+    - name: git-revision
+      type: string
+      description: "Git branch or tag"
+      default: "main"
+    - name: test-profile
+      type: string
+      description: "Test profile (minimal/standard/extended)"
+      default: "minimal"
+    - name: student-model
+      type: string
+      description: "Student model name"
+      default: "HuggingFaceTB/SmolLM2-135M-Instruct"  # pragma: allowlist secret
+    - name: teacher-model
+      type: string
+      description: "Teacher model name"
+      default: "HuggingFaceTB/SmolLM2-135M-Instruct"  # pragma: allowlist secret
+    - name: skip-steps
+      type: string
+      description: "Comma-separated steps to skip (e.g., '1,5,6')"
+      default: ""
+    - name: stop-on-failure
+      type: string
+      description: "Stop on first failure (true/false)"
+      default: "true"
+
+  results:
+    - name: status
+      description: "Overall execution status (success/failure)"
+    - name: steps-passed
+      description: "Number of steps passed"
+    - name: steps-failed
+      description: "Number of steps failed"
+    - name: duration
+      description: "Total duration in seconds"
+
+  stepTemplate:
+    env:
+      - name: STUDENT_MODEL_NAME
+        value: "$(params.student-model)"
+      - name: TEACHER_MODEL_NAME
+        value: "$(params.teacher-model)"
+      - name: E2E_TEST_MODE
+        value: "true"
+      - name: E2E_TEST_PROFILE
+        value: "$(params.test-profile)"
+      - name: TF_CPP_MIN_LOG_LEVEL
+        value: "2"
+      - name: SKIP_STEPS
+        value: "$(params.skip-steps)"
+    resources:
+      requests:
+        memory: "16Gi"
+        cpu: "4"
+        nvidia.com/gpu: 1
+      limits:
+        memory: "32Gi"
+        cpu: "8"
+        nvidia.com/gpu: 1
+
+  steps:
+    # =========================================================================
+    # Step 0: Setup - Clone repo and install dependencies
+    # =========================================================================
+    - name: setup
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      script: |
+        #!/bin/bash
+        set -e
+
+        echo "============================================"
+        echo "🚀 E2E Knowledge-Tuning Pipeline"
+        echo "============================================"
+        echo "Profile: $(params.test-profile)"
+        echo "Student Model: $STUDENT_MODEL_NAME"
+        echo "Teacher Model: $TEACHER_MODEL_NAME"
+        echo "Skip Steps: ${SKIP_STEPS:-None}"
+        echo ""
+
+        # Clone repository
+        echo "📥 Cloning repository..."
+        git clone $(params.git-url) /workspace/repo
+        cd /workspace/repo
+        git checkout $(params.git-revision)
+        echo "✅ Cloned: $(git rev-parse --short HEAD)"
+
+        # Install base dependencies
+        echo ""
+        echo "📦 Installing base dependencies..."
+        pip install -q papermill nbformat nbclient ipykernel python-dotenv
+        pip install -q "numpy<2.0"  # Pin to avoid _ARRAY_API errors
+        python -m ipykernel install --user --name python3
+
+        echo ""
+        echo "✅ Setup complete"
+
+    # =========================================================================
+    # Step 1: Base Model Evaluation
+    # =========================================================================
+    - name: step-01-base-model-evaluation
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      script: |
+        #!/bin/bash
+        set -e
+
+        STEP_NUM="1"
+        STEP_NAME="Base Model Evaluation"
+        NOTEBOOK_DIR="/workspace/repo/examples/knowledge-tuning/01_Base_Model_Evaluation"
+        NOTEBOOK_FILE="Base_Model_Evaluation.ipynb"
+
+        # Check if step should be skipped
+        if echo "$SKIP_STEPS" | grep -qE "(^|,)${STEP_NUM}(,|$)"; then
+          echo "⏭️ Skipping Step ${STEP_NUM}: ${STEP_NAME}"
+          exit 0
+        fi
+
+        echo ""
+        echo "============================================"
+        echo "📓 Step ${STEP_NUM}: ${STEP_NAME}"
+        echo "============================================"
+
+        cd "$NOTEBOOK_DIR"
+
+        # Install step-specific dependencies
+        if [ -f pyproject.toml ]; then
+          echo "📦 Installing dependencies..."
+          python3 -c "
+        import tomllib
+        with open('pyproject.toml', 'rb') as f:
+            deps = tomllib.load(f).get('project', {}).get('dependencies', [])
+        deps = [d for d in deps if not d.lower().startswith('numpy')]
+        if deps: print(' '.join(deps))
+        " | xargs -r pip install -q || true
+        fi
+
+        # Run notebook
+        echo "🔄 Executing notebook..."
+        START_TIME=$(date +%s)
+
+        papermill "$NOTEBOOK_FILE" "/workspace/output/step_01_output.ipynb" \
+          --cwd "$NOTEBOOK_DIR" \
+          --kernel python3 \
+          --progress-bar
+
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+        echo "✅ Step ${STEP_NUM} completed in ${DURATION}s"
+
+    # =========================================================================
+    # Step 2: Data Processing
+    # =========================================================================
+    - name: step-02-data-processing
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      script: |
+        #!/bin/bash
+        set -e
+
+        STEP_NUM="2"
+        STEP_NAME="Data Processing"
+        NOTEBOOK_DIR="/workspace/repo/examples/knowledge-tuning/02_Data_Processing"
+        NOTEBOOK_FILE="Data_Processing.ipynb"
+
+        if echo "$SKIP_STEPS" | grep -qE "(^|,)${STEP_NUM}(,|$)"; then
+          echo "⏭️ Skipping Step ${STEP_NUM}: ${STEP_NAME}"
+          exit 0
+        fi
+
+        echo ""
+        echo "============================================"
+        echo "📓 Step ${STEP_NUM}: ${STEP_NAME}"
+        echo "============================================"
+
+        cd "$NOTEBOOK_DIR"
+
+        if [ -f pyproject.toml ]; then
+          echo "📦 Installing dependencies..."
+          python3 -c "
+        import tomllib
+        with open('pyproject.toml', 'rb') as f:
+            deps = tomllib.load(f).get('project', {}).get('dependencies', [])
+        deps = [d for d in deps if not d.lower().startswith('numpy')]
+        if deps: print(' '.join(deps))
+        " | xargs -r pip install -q || true
+        fi
+
+        echo "🔄 Executing notebook..."
+        START_TIME=$(date +%s)
+
+        papermill "$NOTEBOOK_FILE" "/workspace/output/step_02_output.ipynb" \
+          --cwd "$NOTEBOOK_DIR" \
+          --kernel python3 \
+          --progress-bar
+
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+        echo "✅ Step ${STEP_NUM} completed in ${DURATION}s"
+
+    # =========================================================================
+    # Step 3: Knowledge Generation
+    # =========================================================================
+    - name: step-03-knowledge-generation
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      script: |
+        #!/bin/bash
+        set -e
+
+        STEP_NUM="3"
+        STEP_NAME="Knowledge Generation"
+        NOTEBOOK_DIR="/workspace/repo/examples/knowledge-tuning/03_Knowledge_Generation"
+        NOTEBOOK_FILE="Knowledge_Generation.ipynb"
+
+        if echo "$SKIP_STEPS" | grep -qE "(^|,)${STEP_NUM}(,|$)"; then
+          echo "⏭️ Skipping Step ${STEP_NUM}: ${STEP_NAME}"
+          exit 0
+        fi
+
+        echo ""
+        echo "============================================"
+        echo "📓 Step ${STEP_NUM}: ${STEP_NAME}"
+        echo "============================================"
+
+        cd "$NOTEBOOK_DIR"
+
+        if [ -f pyproject.toml ]; then
+          echo "📦 Installing dependencies..."
+          python3 -c "
+        import tomllib
+        with open('pyproject.toml', 'rb') as f:
+            deps = tomllib.load(f).get('project', {}).get('dependencies', [])
+        deps = [d for d in deps if not d.lower().startswith('numpy')]
+        if deps: print(' '.join(deps))
+        " | xargs -r pip install -q || true
+        fi
+
+        echo "🔄 Executing notebook..."
+        START_TIME=$(date +%s)
+
+        papermill "$NOTEBOOK_FILE" "/workspace/output/step_03_output.ipynb" \
+          --cwd "$NOTEBOOK_DIR" \
+          --kernel python3 \
+          --progress-bar
+
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+        echo "✅ Step ${STEP_NUM} completed in ${DURATION}s"
+
+    # =========================================================================
+    # Step 4: Knowledge Mixing
+    # =========================================================================
+    - name: step-04-knowledge-mixing
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      script: |
+        #!/bin/bash
+        set -e
+
+        STEP_NUM="4"
+        STEP_NAME="Knowledge Mixing"
+        NOTEBOOK_DIR="/workspace/repo/examples/knowledge-tuning/04_Knowledge_Mixing"
+        NOTEBOOK_FILE="Knowledge_Mixing.ipynb"
+
+        if echo "$SKIP_STEPS" | grep -qE "(^|,)${STEP_NUM}(,|$)"; then
+          echo "⏭️ Skipping Step ${STEP_NUM}: ${STEP_NAME}"
+          exit 0
+        fi
+
+        echo ""
+        echo "============================================"
+        echo "📓 Step ${STEP_NUM}: ${STEP_NAME}"
+        echo "============================================"
+
+        cd "$NOTEBOOK_DIR"
+
+        if [ -f pyproject.toml ]; then
+          echo "📦 Installing dependencies..."
+          python3 -c "
+        import tomllib
+        with open('pyproject.toml', 'rb') as f:
+            deps = tomllib.load(f).get('project', {}).get('dependencies', [])
+        deps = [d for d in deps if not d.lower().startswith('numpy')]
+        if deps: print(' '.join(deps))
+        " | xargs -r pip install -q || true
+        fi
+
+        echo "🔄 Executing notebook..."
+        START_TIME=$(date +%s)
+
+        papermill "$NOTEBOOK_FILE" "/workspace/output/step_04_output.ipynb" \
+          --cwd "$NOTEBOOK_DIR" \
+          --kernel python3 \
+          --progress-bar
+
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+        echo "✅ Step ${STEP_NUM} completed in ${DURATION}s"
+
+    # =========================================================================
+    # Step 5: Model Training
+    # =========================================================================
+    - name: step-05-model-training
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      timeout: 2h
+      script: |
+        #!/bin/bash
+        set -e
+
+        STEP_NUM="5"
+        STEP_NAME="Model Training"
+        NOTEBOOK_DIR="/workspace/repo/examples/knowledge-tuning/05_Model_Training"
+        NOTEBOOK_FILE="Model_Training.ipynb"
+
+        if echo "$SKIP_STEPS" | grep -qE "(^|,)${STEP_NUM}(,|$)"; then
+          echo "⏭️ Skipping Step ${STEP_NUM}: ${STEP_NAME}"
+          exit 0
+        fi
+
+        echo ""
+        echo "============================================"
+        echo "📓 Step ${STEP_NUM}: ${STEP_NAME}"
+        echo "============================================"
+
+        cd "$NOTEBOOK_DIR"
+
+        if [ -f pyproject.toml ]; then
+          echo "📦 Installing dependencies..."
+          python3 -c "
+        import tomllib
+        with open('pyproject.toml', 'rb') as f:
+            deps = tomllib.load(f).get('project', {}).get('dependencies', [])
+        deps = [d for d in deps if not d.lower().startswith('numpy')]
+        if deps: print(' '.join(deps))
+        " | xargs -r pip install -q || true
+        fi
+
+        echo "🔄 Executing notebook (this may take a while)..."
+        START_TIME=$(date +%s)
+
+        papermill "$NOTEBOOK_FILE" "/workspace/output/step_05_output.ipynb" \
+          --cwd "$NOTEBOOK_DIR" \
+          --kernel python3 \
+          --progress-bar
+
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+        echo "✅ Step ${STEP_NUM} completed in ${DURATION}s"
+
+    # =========================================================================
+    # Step 6: Evaluation
+    # =========================================================================
+    - name: step-06-evaluation
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      script: |
+        #!/bin/bash
+        set -e
+
+        STEP_NUM="6"
+        STEP_NAME="Evaluation"
+        NOTEBOOK_DIR="/workspace/repo/examples/knowledge-tuning/06_Evaluation"
+        NOTEBOOK_FILE="Evaluation.ipynb"
+
+        if echo "$SKIP_STEPS" | grep -qE "(^|,)${STEP_NUM}(,|$)"; then
+          echo "⏭️ Skipping Step ${STEP_NUM}: ${STEP_NAME}"
+          exit 0
+        fi
+
+        echo ""
+        echo "============================================"
+        echo "📓 Step ${STEP_NUM}: ${STEP_NAME}"
+        echo "============================================"
+
+        cd "$NOTEBOOK_DIR"
+
+        if [ -f pyproject.toml ]; then
+          echo "📦 Installing dependencies..."
+          python3 -c "
+        import tomllib
+        with open('pyproject.toml', 'rb') as f:
+            deps = tomllib.load(f).get('project', {}).get('dependencies', [])
+        deps = [d for d in deps if not d.lower().startswith('numpy')]
+        if deps: print(' '.join(deps))
+        " | xargs -r pip install -q || true
+        fi
+
+        echo "🔄 Executing notebook..."
+        START_TIME=$(date +%s)
+
+        papermill "$NOTEBOOK_FILE" "/workspace/output/step_06_output.ipynb" \
+          --cwd "$NOTEBOOK_DIR" \
+          --kernel python3 \
+          --progress-bar
+
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+        echo "✅ Step ${STEP_NUM} completed in ${DURATION}s"
+
+    # =========================================================================
+    # Final: Generate Report
+    # =========================================================================
+    - name: report
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      script: |
+        #!/bin/bash
+
+        echo ""
+        echo "============================================"
+        echo "📊 E2E Pipeline Complete"
+        echo "============================================"
+
+        # Count executed notebooks
+        PASSED=$(ls /workspace/output/*.ipynb 2>/dev/null | wc -l)
+        TOTAL=6
+        SKIPPED=$(echo "$SKIP_STEPS" | tr ',' '\n' | grep -c . || echo 0)
+
+        echo "Steps Passed: $PASSED"
+        echo "Steps Skipped: $SKIPPED"
+        echo ""
+
+        # List output notebooks
+        echo "📁 Output notebooks:"
+        ls -la /workspace/output/*.ipynb 2>/dev/null || echo "  No outputs found"
+
+        # Write results
+        echo "success" > $(results.status.path)
+        echo "$PASSED" > $(results.steps-passed.path)
+        echo "0" > $(results.steps-failed.path)
+        echo "0" > $(results.duration.path)
+
+        echo ""
+        echo "✅ All E2E tests completed successfully!"

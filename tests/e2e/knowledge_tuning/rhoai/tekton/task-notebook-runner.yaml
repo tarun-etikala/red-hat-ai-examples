@@ -1,0 +1,294 @@
+# =============================================================================
+# Tekton Task: Notebook Runner
+# =============================================================================
+# Reusable Task that executes a single Jupyter notebook step.
+# Each notebook runs in its own Pod with isolated dependencies.
+# =============================================================================
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: notebook-runner
+  namespace: e2e-tests
+  labels:
+    app.kubernetes.io/name: e2e-tests
+    app.kubernetes.io/component: notebook-runner
+spec:
+  description: |
+    Executes a single notebook from the knowledge-tuning workflow.
+    Installs step-specific dependencies and runs via Papermill.
+
+  params:
+    - name: step-number
+      type: string
+      description: "Step number (1-6)"
+    - name: step-name
+      type: string
+      description: "Human-readable step name"
+    - name: notebook-path
+      type: string
+      description: "Relative path to notebook from knowledge-tuning directory"
+    - name: git-url
+      type: string
+      description: "Git repository URL"
+      default: "https://github.com/red-hat-data-services/red-hat-ai-examples.git"
+    - name: git-revision
+      type: string
+      description: "Git branch or tag"
+      default: "main"
+    - name: test-profile
+      type: string
+      description: "Test profile (minimal/standard/extended)"
+      default: "minimal"
+    - name: student-model
+      type: string
+      description: "Student model name"
+      default: "HuggingFaceTB/SmolLM2-135M-Instruct"  # pragma: allowlist secret
+    - name: teacher-model
+      type: string
+      description: "Teacher model name"
+      default: "HuggingFaceTB/SmolLM2-135M-Instruct"  # pragma: allowlist secret
+
+  workspaces:
+    - name: shared-data
+      description: "Shared workspace for outputs between steps"
+    - name: output-notebooks
+      description: "Workspace for executed notebooks"
+
+  results:
+    - name: status
+      description: "Execution status (success/failure)"
+    - name: duration
+      description: "Execution duration in seconds"
+    - name: error-message
+      description: "Error message if failed"
+
+  stepTemplate:
+    env:
+      - name: STUDENT_MODEL_NAME
+        value: "$(params.student-model)"
+      - name: TEACHER_MODEL_NAME
+        value: "$(params.teacher-model)"
+      - name: E2E_TEST_MODE
+        value: "true"
+      - name: TF_CPP_MIN_LOG_LEVEL
+        value: "2"
+    resources:
+      requests:
+        memory: "8Gi"
+        cpu: "2"
+      limits:
+        memory: "16Gi"
+        cpu: "4"
+
+  steps:
+    - name: clone-repo
+      image: gcr.io/tekton-releases/github.com/tektoncd/pipeline/cmd/git-init:latest
+      script: |
+        #!/bin/bash
+        set -e
+        echo "📥 Cloning repository..."
+
+        REPO_DIR="$(workspaces.shared-data.path)/repo"
+
+        if [ -d "$REPO_DIR/.git" ]; then
+          echo "Repository already cloned, pulling latest..."
+          cd "$REPO_DIR"
+          git fetch origin
+          git checkout $(params.git-revision)
+          git pull origin $(params.git-revision) || true
+        else
+          git clone $(params.git-url) "$REPO_DIR"
+          cd "$REPO_DIR"
+          git checkout $(params.git-revision)
+        fi
+
+        echo "✅ Repository ready at: $REPO_DIR"
+        echo "   Branch: $(git rev-parse --abbrev-ref HEAD)"
+        echo "   Commit: $(git rev-parse --short HEAD)"
+
+    - name: install-dependencies
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      script: |
+        #!/bin/bash
+        set -e
+
+        echo "🔧 Installing dependencies for Step $(params.step-number): $(params.step-name)"
+
+        REPO_DIR="$(workspaces.shared-data.path)/repo"
+        NOTEBOOK_DIR="$REPO_DIR/examples/knowledge-tuning/$(dirname $(params.notebook-path))"
+
+        # Install base dependencies
+        pip install -q papermill nbformat nbclient ipykernel
+        pip install -q python-dotenv
+
+        # Pin numpy to avoid _ARRAY_API errors
+        pip install -q "numpy<2.0"
+
+        # Install notebook-specific dependencies
+        if [ -f "$NOTEBOOK_DIR/pyproject.toml" ]; then
+          echo "📦 Found pyproject.toml, extracting dependencies..."
+
+          # Extract and install dependencies
+          python3 << 'EOF'
+        import sys
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
+
+        pyproject_path = sys.argv[1] if len(sys.argv) > 1 else "pyproject.toml"
+
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+
+        deps = data.get("project", {}).get("dependencies", [])
+
+        # Filter and fix dependencies
+        fixed_deps = []
+        for dep in deps:
+            if dep.lower().startswith("numpy"):
+                continue  # Skip, already pinned
+            fixed_deps.append(dep)
+
+        if fixed_deps:
+            print(" ".join(fixed_deps))
+        EOF
+
+          DEPS=$(python3 -c "
+        import sys
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
+        with open('$NOTEBOOK_DIR/pyproject.toml', 'rb') as f:
+            data = tomllib.load(f)
+        deps = data.get('project', {}).get('dependencies', [])
+        fixed = [d for d in deps if not d.lower().startswith('numpy')]
+        print(' '.join(fixed))
+        " 2>/dev/null || echo "")
+
+          if [ -n "$DEPS" ]; then
+            echo "📋 Installing: $DEPS"
+            pip install -q $DEPS || echo "⚠️ Some dependencies may have failed"
+          fi
+        fi
+
+        # Install Jupyter kernel
+        python -m ipykernel install --user --name python3
+
+        echo "✅ Dependencies installed"
+
+    - name: run-notebook
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      resources:
+        requests:
+          nvidia.com/gpu: 1
+          memory: "16Gi"
+          cpu: "4"
+        limits:
+          nvidia.com/gpu: 1
+          memory: "32Gi"
+          cpu: "8"
+      script: |
+        #!/bin/bash
+        set -e
+
+        echo "🚀 Running Step $(params.step-number): $(params.step-name)"
+
+        REPO_DIR="$(workspaces.shared-data.path)/repo"
+        NOTEBOOK_PATH="$REPO_DIR/examples/knowledge-tuning/$(params.notebook-path)"
+        OUTPUT_DIR="$(workspaces.output-notebooks.path)"
+        OUTPUT_NOTEBOOK="$OUTPUT_DIR/step_$(params.step-number)_$(params.step-name | tr ' ' '_').ipynb"
+
+        START_TIME=$(date +%s)
+
+        # Create output directory
+        mkdir -p "$OUTPUT_DIR"
+
+        # Set working directory for notebook
+        cd "$(dirname $NOTEBOOK_PATH)"
+
+        # Run notebook with papermill
+        echo "📓 Executing: $NOTEBOOK_PATH"
+
+        if papermill "$NOTEBOOK_PATH" "$OUTPUT_NOTEBOOK" \
+          --cwd "$(dirname $NOTEBOOK_PATH)" \
+          --kernel python3 \
+          --progress-bar 2>&1; then
+
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+
+          echo "success" > $(results.status.path)
+          echo "$DURATION" > $(results.duration.path)
+          echo "" > $(results.error-message.path)
+
+          echo "✅ Step $(params.step-number) completed in ${DURATION}s"
+        else
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+
+          echo "failure" > $(results.status.path)
+          echo "$DURATION" > $(results.duration.path)
+          echo "Notebook execution failed" > $(results.error-message.path)
+
+          echo "❌ Step $(params.step-number) failed after ${DURATION}s"
+          exit 1
+        fi
+
+    - name: verify-outputs
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      script: |
+        #!/bin/bash
+
+        echo "🔍 Verifying outputs for Step $(params.step-number)..."
+
+        REPO_DIR="$(workspaces.shared-data.path)/repo"
+        OUTPUT_DIR="$REPO_DIR/examples/knowledge-tuning/output"
+
+        case $(params.step-number) in
+          1)
+            if [ -d "$OUTPUT_DIR/base_model" ]; then
+              echo "✅ Base model directory exists"
+            else
+              echo "⚠️ Base model directory not found (may be expected)"
+            fi
+            ;;
+          2)
+            if [ -f "$OUTPUT_DIR/step_02/seed_data.jsonl" ]; then
+              echo "✅ Seed data file created"
+              wc -l "$OUTPUT_DIR/step_02/seed_data.jsonl"
+            else
+              echo "⚠️ Seed data file not found"
+            fi
+            ;;
+          3)
+            if [ -d "$OUTPUT_DIR/step_03" ]; then
+              echo "✅ Knowledge generation output exists"
+              ls -la "$OUTPUT_DIR/step_03/"
+            else
+              echo "⚠️ Knowledge generation output not found"
+            fi
+            ;;
+          4)
+            if [ -d "$OUTPUT_DIR/step_04" ]; then
+              echo "✅ Knowledge mixing output exists"
+              ls -la "$OUTPUT_DIR/step_04/"
+            else
+              echo "⚠️ Knowledge mixing output not found"
+            fi
+            ;;
+          5)
+            if [ -d "$OUTPUT_DIR/fine_tuned_model" ]; then
+              echo "✅ Fine-tuned model directory exists"
+            else
+              echo "⚠️ Fine-tuned model not found"
+            fi
+            ;;
+          6)
+            echo "✅ Evaluation step completed"
+            ;;
+        esac
+
+        echo "📁 Current output structure:"
+        find "$OUTPUT_DIR" -type f | head -20 || echo "No outputs yet"

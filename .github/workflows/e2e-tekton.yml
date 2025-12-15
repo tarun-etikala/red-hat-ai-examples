@@ -1,0 +1,469 @@
+name: E2E Tests via Tekton on RHOAI
+
+# =============================================================================
+# This workflow triggers E2E tests using Tekton Pipelines on RHOAI.
+# Two modes available:
+# - Single Pod (default): Fast startup, simple debugging, all steps in one Pod
+# - Multi Pod: Step isolation, per-step retry, separate Pod per notebook
+# =============================================================================
+
+on:
+  # Manual trigger with parameters
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Test profile'
+        required: true
+        default: 'minimal'
+        type: choice
+        options:
+          - minimal
+          - standard
+          - extended
+      mode:
+        description: 'Execution mode'
+        required: true
+        default: 'single-pod'
+        type: choice
+        options:
+          - single-pod
+          - multi-pod
+      skip_steps:
+        description: 'Steps to skip (comma-separated, e.g., "1,5,6")'
+        required: false
+        default: ''
+        type: string
+      git_branch:
+        description: 'Git branch to test'
+        required: false
+        default: 'main'
+        type: string
+
+  # Weekly scheduled run (uses single-pod mode)
+  schedule:
+    - cron: '0 3 * * 0'  # Sundays at 3 AM UTC
+
+env:
+  OPENSHIFT_NAMESPACE: e2e-tests
+
+jobs:
+  # ==========================================================================
+  # Job 1: Setup Tekton resources (first-time only)
+  # ==========================================================================
+  setup-tekton:
+    name: Setup Tekton Resources
+    runs-on: ubuntu-latest
+    outputs:
+      resources_ready: ${{ steps.check.outputs.ready }}
+      pipeline_name: ${{ steps.check.outputs.pipeline_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install OpenShift CLI
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: '4.14'
+
+      - name: Log in to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          insecure_skip_tls_verify: true
+          namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+
+      - name: Create namespace if not exists
+        run: |
+          oc get namespace ${{ env.OPENSHIFT_NAMESPACE }} || \
+          oc create namespace ${{ env.OPENSHIFT_NAMESPACE }}
+
+      - name: Apply Tekton resources
+        run: |
+          echo "📦 Applying Tekton resources..."
+
+          MODE="${{ github.event.inputs.mode || 'single-pod' }}"
+
+          # Apply common resources (PVCs, ServiceAccount)
+          oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/resources.yaml
+
+          if [ "$MODE" == "single-pod" ]; then
+            echo "📦 Applying single-pod Task and Pipeline..."
+            oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/task-e2e-single-pod.yaml
+            oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/pipeline-single-pod.yaml
+          else
+            echo "📦 Applying multi-pod Task and Pipeline..."
+            oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/task-notebook-runner.yaml
+            oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/pipeline-e2e.yaml
+          fi
+
+          echo "✅ Tekton resources applied"
+
+      - name: Verify resources
+        id: check
+        run: |
+          echo "🔍 Verifying Tekton resources..."
+
+          MODE="${{ github.event.inputs.mode || 'single-pod' }}"
+
+          if [ "$MODE" == "single-pod" ]; then
+            PIPELINE_NAME="e2e-knowledge-tuning-single-pod"
+            TASK_NAME="e2e-knowledge-tuning-single-pod"
+          else
+            PIPELINE_NAME="e2e-knowledge-tuning"
+            TASK_NAME="notebook-runner"
+          fi
+
+          # Check Pipeline exists
+          oc get pipeline $PIPELINE_NAME -n ${{ env.OPENSHIFT_NAMESPACE }}
+
+          # Check Task exists
+          oc get task $TASK_NAME -n ${{ env.OPENSHIFT_NAMESPACE }}
+
+          # Check PVCs
+          oc get pvc -n ${{ env.OPENSHIFT_NAMESPACE }}
+
+          echo "pipeline_name=$PIPELINE_NAME" >> $GITHUB_OUTPUT
+          echo "ready=true" >> $GITHUB_OUTPUT
+          echo "✅ All resources ready (mode: $MODE)"
+
+  # ==========================================================================
+  # Job 2: Trigger Tekton Pipeline
+  # ==========================================================================
+  trigger-pipeline:
+    name: Trigger Tekton Pipeline
+    runs-on: ubuntu-latest
+    needs: setup-tekton
+    if: needs.setup-tekton.outputs.resources_ready == 'true'
+    outputs:
+      pipelinerun_name: ${{ steps.trigger.outputs.pipelinerun_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install OpenShift CLI
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: '4.14'
+
+      - name: Install Tekton CLI
+        run: |
+          curl -LO https://github.com/tektoncd/cli/releases/download/v0.35.1/tkn_0.35.1_Linux_x86_64.tar.gz
+          tar xvzf tkn_0.35.1_Linux_x86_64.tar.gz
+          sudo mv tkn /usr/local/bin/
+
+      - name: Log in to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          insecure_skip_tls_verify: true
+          namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+
+      - name: Set parameters
+        id: params
+        run: |  # pragma: allowlist secret
+          PROFILE="${{ github.event.inputs.profile || 'minimal' }}"
+          SKIP_STEPS="${{ github.event.inputs.skip_steps || '' }}"
+          GIT_BRANCH="${{ github.event.inputs.git_branch || 'main' }}"
+
+          # Select model based on profile
+          case $PROFILE in
+            minimal)
+              MODEL="HuggingFaceTB/SmolLM2-135M-Instruct"
+              ;;
+            standard)
+              MODEL="HuggingFaceTB/SmolLM2-360M-Instruct"
+              ;;
+            extended)
+              MODEL="Qwen/Qwen2.5-0.5B-Instruct"
+              ;;
+          esac
+
+          echo "profile=$PROFILE" >> $GITHUB_OUTPUT
+          echo "skip_steps=$SKIP_STEPS" >> $GITHUB_OUTPUT
+          echo "git_branch=$GIT_BRANCH" >> $GITHUB_OUTPUT
+          echo "model=$MODEL" >> $GITHUB_OUTPUT
+
+          echo "📋 Pipeline Parameters:"
+          echo "   Profile: $PROFILE"
+          echo "   Model: $MODEL"
+          echo "   Skip Steps: $SKIP_STEPS"
+          echo "   Branch: $GIT_BRANCH"
+
+      - name: Trigger PipelineRun
+        id: trigger
+        run: |
+          PIPELINERUN_NAME="e2e-run-${{ github.run_id }}-${{ github.run_attempt }}"
+          PIPELINE_NAME="${{ needs.setup-tekton.outputs.pipeline_name }}"
+          MODE="${{ github.event.inputs.mode || 'single-pod' }}"
+
+          echo "🚀 Creating PipelineRun: $PIPELINERUN_NAME"
+          echo "   Pipeline: $PIPELINE_NAME"
+          echo "   Mode: $MODE"
+
+          # Single-pod mode doesn't use workspaces (uses emptyDir internally)
+          if [ "$MODE" == "single-pod" ]; then
+            cat <<EOF | oc apply -f -
+          apiVersion: tekton.dev/v1beta1
+          kind: PipelineRun
+          metadata:
+            name: ${PIPELINERUN_NAME}
+            namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+            labels:
+              app: e2e-tests
+              trigger: github-actions
+              mode: single-pod
+              github-run-id: "${{ github.run_id }}"
+          spec:
+            pipelineRef:
+              name: ${PIPELINE_NAME}
+            serviceAccountName: e2e-pipeline-sa
+            params:
+              - name: git-url
+                value: "https://github.com/${{ github.repository }}.git"
+              - name: git-revision
+                value: "${{ steps.params.outputs.git_branch }}"
+              - name: test-profile
+                value: "${{ steps.params.outputs.profile }}"
+              - name: student-model
+                value: "${{ steps.params.outputs.model }}"
+              - name: teacher-model
+                value: "${{ steps.params.outputs.model }}"
+              - name: skip-steps
+                value: "${{ steps.params.outputs.skip_steps }}"
+            podTemplate:
+              tolerations:
+                - key: "nvidia.com/gpu"
+                  operator: "Exists"
+                  effect: "NoSchedule"
+              nodeSelector:
+                nvidia.com/gpu.present: "true"
+          EOF
+          else
+            # Multi-pod mode uses PVC workspaces
+            cat <<EOF | oc apply -f -
+          apiVersion: tekton.dev/v1beta1
+          kind: PipelineRun
+          metadata:
+            name: ${PIPELINERUN_NAME}
+            namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+            labels:
+              app: e2e-tests
+              trigger: github-actions
+              mode: multi-pod
+              github-run-id: "${{ github.run_id }}"
+          spec:
+            pipelineRef:
+              name: ${PIPELINE_NAME}
+            serviceAccountName: e2e-pipeline-sa
+            params:
+              - name: git-url
+                value: "https://github.com/${{ github.repository }}.git"
+              - name: git-revision
+                value: "${{ steps.params.outputs.git_branch }}"
+              - name: test-profile
+                value: "${{ steps.params.outputs.profile }}"
+              - name: student-model
+                value: "${{ steps.params.outputs.model }}"
+              - name: teacher-model
+                value: "${{ steps.params.outputs.model }}"
+              - name: skip-steps
+                value: "${{ steps.params.outputs.skip_steps }}"
+            workspaces:
+              - name: shared-data
+                persistentVolumeClaim:
+                  claimName: e2e-shared-data
+              - name: output-notebooks
+                persistentVolumeClaim:
+                  claimName: e2e-output-notebooks
+            podTemplate:
+              tolerations:
+                - key: "nvidia.com/gpu"
+                  operator: "Exists"
+                  effect: "NoSchedule"
+              nodeSelector:
+                nvidia.com/gpu.present: "true"
+          EOF
+          fi
+
+          echo "pipelinerun_name=$PIPELINERUN_NAME" >> $GITHUB_OUTPUT
+          echo "✅ PipelineRun created"
+
+      - name: Generate summary
+        run: |
+          MODE="${{ github.event.inputs.mode || 'single-pod' }}"
+          echo "## Tekton Pipeline Triggered" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| PipelineRun | \`${{ steps.trigger.outputs.pipelinerun_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Mode | $MODE |" >> $GITHUB_STEP_SUMMARY
+          echo "| Profile | ${{ steps.params.outputs.profile }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Model | ${{ steps.params.outputs.model }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | ${{ steps.params.outputs.git_branch }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Skip Steps | ${{ steps.params.outputs.skip_steps || 'None' }} |" >> $GITHUB_STEP_SUMMARY
+
+  # ==========================================================================
+  # Job 3: Monitor Pipeline Execution
+  # ==========================================================================
+  monitor-pipeline:
+    name: Monitor Pipeline
+    runs-on: ubuntu-latest
+    needs: trigger-pipeline
+    timeout-minutes: 240  # 4 hours max
+
+    steps:
+      - name: Install OpenShift CLI
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: '4.14'
+
+      - name: Install Tekton CLI
+        run: |
+          curl -LO https://github.com/tektoncd/cli/releases/download/v0.35.1/tkn_0.35.1_Linux_x86_64.tar.gz
+          tar xvzf tkn_0.35.1_Linux_x86_64.tar.gz
+          sudo mv tkn /usr/local/bin/
+
+      - name: Log in to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          insecure_skip_tls_verify: true
+          namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+
+      - name: Wait for pipeline to start
+        run: |
+          PIPELINERUN="${{ needs.trigger-pipeline.outputs.pipelinerun_name }}"
+          echo "⏳ Waiting for PipelineRun to start: $PIPELINERUN"
+
+          for i in {1..30}; do
+            STATUS=$(oc get pipelinerun $PIPELINERUN -o jsonpath='{.status.conditions[0].reason}' 2>/dev/null || echo "Pending")
+            if [ "$STATUS" != "Pending" ]; then
+              echo "✅ Pipeline started with status: $STATUS"
+              break
+            fi
+            echo "  Waiting... ($i/30)"
+            sleep 10
+          done
+
+      - name: Stream pipeline logs
+        run: |
+          PIPELINERUN="${{ needs.trigger-pipeline.outputs.pipelinerun_name }}"
+          echo "📜 Streaming logs for: $PIPELINERUN"
+          echo ""
+
+          # Stream logs from all tasks
+          tkn pipelinerun logs $PIPELINERUN -n ${{ env.OPENSHIFT_NAMESPACE }} -f || true
+
+      - name: Check final status
+        id: status
+        run: |
+          PIPELINERUN="${{ needs.trigger-pipeline.outputs.pipelinerun_name }}"
+
+          # Wait for completion
+          echo "⏳ Waiting for pipeline completion..."
+          oc wait --for=condition=Succeeded pipelinerun/$PIPELINERUN \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            --timeout=240m || true
+
+          # Get final status
+          STATUS=$(oc get pipelinerun $PIPELINERUN \
+            -o jsonpath='{.status.conditions[0].reason}' 2>/dev/null || echo "Unknown")
+
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+
+          if [ "$STATUS" == "Succeeded" ]; then
+            echo "✅ Pipeline completed successfully!"
+          else
+            echo "❌ Pipeline status: $STATUS"
+          fi
+
+      - name: Get task results
+        if: always()
+        run: |
+          PIPELINERUN="${{ needs.trigger-pipeline.outputs.pipelinerun_name }}"
+
+          echo "📊 Task Results:"
+          echo ""
+
+          # List all TaskRuns for this PipelineRun
+          oc get taskruns -l tekton.dev/pipelineRun=$PIPELINERUN \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            -o custom-columns=NAME:.metadata.name,STATUS:.status.conditions[0].reason,DURATION:.status.durationSeconds
+
+      - name: Generate final summary
+        if: always()
+        run: |
+          PIPELINERUN="${{ needs.trigger-pipeline.outputs.pipelinerun_name }}"
+          STATUS="${{ steps.status.outputs.status }}"
+
+          echo "## Tekton Pipeline Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**PipelineRun:** \`$PIPELINERUN\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** $STATUS" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Task Status" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          oc get taskruns -l tekton.dev/pipelineRun=$PIPELINERUN \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            -o custom-columns=TASK:.metadata.name,STATUS:.status.conditions[0].reason 2>/dev/null || echo "No tasks found"
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          if [ "$STATUS" == "Succeeded" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **All E2E tests passed!**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Pipeline failed or incomplete**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Fail if pipeline failed
+        if: steps.status.outputs.status != 'Succeeded'
+        run: |
+          echo "❌ Pipeline did not succeed (status: ${{ steps.status.outputs.status }})"
+          exit 1
+
+  # ==========================================================================
+  # Job 4: Cleanup old PipelineRuns (optional)
+  # ==========================================================================
+  cleanup:
+    name: Cleanup Old Runs
+    runs-on: ubuntu-latest
+    needs: monitor-pipeline
+    if: always()
+
+    steps:
+      - name: Install OpenShift CLI
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: '4.14'
+
+      - name: Log in to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          insecure_skip_tls_verify: true
+          namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+
+      - name: Cleanup old PipelineRuns
+        run: |
+          echo "🧹 Cleaning up old PipelineRuns (keeping last 5)..."
+
+          # Get PipelineRuns sorted by creation time, skip the 5 most recent
+          OLD_RUNS=$(oc get pipelineruns -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            --sort-by=.metadata.creationTimestamp \
+            -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | head -n -5)
+
+          if [ -n "$OLD_RUNS" ]; then
+            echo "Deleting old runs:"
+            echo "$OLD_RUNS"
+            echo "$OLD_RUNS" | xargs -r oc delete pipelinerun -n ${{ env.OPENSHIFT_NAMESPACE }} || true
+          else
+            echo "No old runs to clean up"
+          fi

@@ -1,0 +1,60 @@
+# =============================================================================
+# Tekton Pipeline: E2E Single Pod (wrapper for retry capability)
+# =============================================================================
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: e2e-knowledge-tuning-single-pod
+  namespace: e2e-tests
+  labels:
+    app.kubernetes.io/name: e2e-tests
+spec:
+  description: |
+    Single-pod E2E pipeline with retry capability.
+    All notebooks run in one Pod for fast execution.
+
+  params:
+    - name: git-url
+      type: string
+      default: "https://github.com/red-hat-data-services/red-hat-ai-examples.git"
+    - name: git-revision
+      type: string
+      default: "main"
+    - name: test-profile
+      type: string
+      default: "minimal"
+    - name: student-model
+      type: string
+      default: "HuggingFaceTB/SmolLM2-135M-Instruct"  # pragma: allowlist secret
+    - name: teacher-model
+      type: string
+      default: "HuggingFaceTB/SmolLM2-135M-Instruct"  # pragma: allowlist secret
+    - name: skip-steps
+      type: string
+      default: ""
+
+  results:
+    - name: status
+      value: "$(tasks.run-e2e.results.status)"
+    - name: steps-passed
+      value: "$(tasks.run-e2e.results.steps-passed)"
+
+  tasks:
+    - name: run-e2e
+      taskRef:
+        name: e2e-knowledge-tuning-single-pod
+      retries: 1  # Retry entire pipeline once on failure
+      timeout: "4h"
+      params:
+        - name: git-url
+          value: "$(params.git-url)"
+        - name: git-revision
+          value: "$(params.git-revision)"
+        - name: test-profile
+          value: "$(params.test-profile)"
+        - name: student-model
+          value: "$(params.student-model)"
+        - name: teacher-model
+          value: "$(params.teacher-model)"
+        - name: skip-steps
+          value: "$(params.skip-steps)"
