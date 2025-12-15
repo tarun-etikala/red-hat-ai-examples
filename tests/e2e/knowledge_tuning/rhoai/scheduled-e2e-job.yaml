@@ -1,0 +1,212 @@
+# =============================================================================
+# Kubernetes CronJob for Scheduled E2E Testing on RHOAI
+# =============================================================================
+# This creates a CronJob that runs E2E tests on a schedule directly on RHOAI.
+# No GitHub Actions runner required - runs natively on OpenShift.
+#
+# Usage:
+#   oc apply -f scheduled-e2e-job.yaml
+#   oc get cronjobs -n e2e-tests
+#   oc get jobs -n e2e-tests
+# =============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: e2e-tests
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-test-config
+  namespace: e2e-tests
+data:
+  GIT_REPO_URL: "https://github.com/red-hat-data-services/red-hat-ai-examples.git"
+  GIT_BRANCH: "main"
+  TEST_PROFILE: "minimal"
+  SKIP_STEPS: ""
+  STUDENT_MODEL_NAME: "HuggingFaceTB/SmolLM2-135M-Instruct"  # pragma: allowlist secret
+  TEACHER_MODEL_NAME: "HuggingFaceTB/SmolLM2-135M-Instruct"  # pragma: allowlist secret
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: e2e-results-pvc
+  namespace: e2e-tests
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: e2e-knowledge-tuning
+  namespace: e2e-tests
+spec:
+  # Run weekly on Sundays at 2 AM UTC
+  schedule: "0 2 * * 0"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 14400  # 4 hour timeout
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: e2e-tests
+        spec:
+          restartPolicy: Never
+          tolerations:
+            - key: "nvidia.com/gpu"
+              operator: "Exists"
+              effect: "NoSchedule"
+          nodeSelector:
+            nvidia.com/gpu.present: "true"
+          containers:
+            - name: e2e-runner
+              # Use RHOAI's runtime image with CUDA support
+              image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+              resources:
+                requests:
+                  nvidia.com/gpu: 1
+                  memory: "16Gi"
+                  cpu: "4"
+                limits:
+                  nvidia.com/gpu: 1
+                  memory: "32Gi"
+                  cpu: "8"
+              envFrom:
+                - configMapRef:
+                    name: e2e-test-config
+              volumeMounts:
+                - name: results
+                  mountPath: /results
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -e
+
+                  echo "============================================"
+                  echo "E2E Knowledge-Tuning Test Job"
+                  echo "Started: $(date)"
+                  echo "============================================"
+
+                  # Setup
+                  WORK_DIR="/tmp/e2e-work"
+                  mkdir -p $WORK_DIR
+                  cd $WORK_DIR
+
+                  # Clone repository
+                  echo "📥 Cloning repository..."
+                  git clone $GIT_REPO_URL repo
+                  cd repo
+                  git checkout $GIT_BRANCH
+
+                  # Install dependencies
+                  echo "🔧 Installing dependencies..."
+                  pip install --upgrade pip
+                  pip install pytest papermill nbformat nbclient ipykernel jupyter-client
+                  pip install python-dotenv torch transformers accelerate
+                  python -m ipykernel install --user --name python3
+
+                  # Check GPU
+                  echo "🖥️ GPU Status:"
+                  python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU count: {torch.cuda.device_count()}')" || echo "PyTorch not available"
+                  nvidia-smi || echo "nvidia-smi not available"
+
+                  # Run tests
+                  echo "🚀 Running E2E tests..."
+                  cd tests/e2e/knowledge_tuning
+
+                  SKIP_ARGS=""
+                  if [ -n "$SKIP_STEPS" ]; then
+                    SKIP_ARGS="--skip-steps=$SKIP_STEPS"
+                  fi
+
+                  python run_e2e.py \
+                    --profile $TEST_PROFILE \
+                    $SKIP_ARGS \
+                    --output-dir /results/$(date +%Y%m%d-%H%M%S) \
+                    2>&1 | tee /results/latest-run.log
+
+                  EXIT_CODE=$?
+
+                  echo "============================================"
+                  echo "E2E Test Job Completed"
+                  echo "Exit code: $EXIT_CODE"
+                  echo "Finished: $(date)"
+                  echo "============================================"
+
+                  exit $EXIT_CODE
+          volumes:
+            - name: results
+              persistentVolumeClaim:
+                claimName: e2e-results-pvc
+---
+# Manual Job template for on-demand testing
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: e2e-manual-
+  namespace: e2e-tests
+  labels:
+    app: e2e-tests
+    type: manual
+spec:
+  activeDeadlineSeconds: 14400
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: e2e-tests
+    spec:
+      restartPolicy: Never
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+        - name: e2e-runner
+          image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+          resources:
+            requests:
+              nvidia.com/gpu: 1
+              memory: "16Gi"
+              cpu: "4"
+            limits:
+              nvidia.com/gpu: 1
+              memory: "32Gi"
+              cpu: "8"
+          envFrom:
+            - configMapRef:
+                name: e2e-test-config
+          volumeMounts:
+            - name: results
+              mountPath: /results
+          command:
+            - /bin/bash
+            - -c
+            - |
+              # Same script as CronJob above
+              set -e
+              WORK_DIR="/tmp/e2e-work"
+              mkdir -p $WORK_DIR && cd $WORK_DIR
+              git clone $GIT_REPO_URL repo && cd repo && git checkout $GIT_BRANCH
+              pip install --upgrade pip
+              pip install pytest papermill nbformat nbclient ipykernel jupyter-client python-dotenv torch transformers accelerate
+              python -m ipykernel install --user --name python3
+              cd tests/e2e/knowledge_tuning
+              SKIP_ARGS="" && [ -n "$SKIP_STEPS" ] && SKIP_ARGS="--skip-steps=$SKIP_STEPS"
+              python run_e2e.py --profile $TEST_PROFILE $SKIP_ARGS --output-dir /results/manual-$(date +%Y%m%d-%H%M%S)
+      volumes:
+        - name: results
+          persistentVolumeClaim:
+            claimName: e2e-results-pvc

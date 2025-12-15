@@ -1,0 +1,352 @@
+name: E2E Pipeline Tests
+
+on:
+  # Manual trigger with customizable parameters
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Test profile (minimal/standard/extended)'
+        required: true
+        default: 'minimal'
+        type: choice
+        options:
+          - minimal
+          - standard
+          - extended
+      skip_steps:
+        description: 'Steps to skip (comma-separated, e.g., "1,5,6")'
+        required: false
+        default: ''
+        type: string
+      runner:
+        description: 'Runner type'
+        required: true
+        default: 'ubuntu-latest'
+        type: choice
+        options:
+          - ubuntu-latest
+          - self-hosted-gpu
+          - self-hosted-rhoai
+      run_full_pipeline:
+        description: 'Run full pipeline (requires GPU runner)'
+        required: false
+        default: false
+        type: boolean
+
+  # Scheduled runs (weekly on Sundays at midnight UTC)
+  schedule:
+    - cron: '0 0 * * 0'
+
+  # Can also be triggered by other workflows
+  workflow_call:
+    inputs:
+      profile:
+        description: 'Test profile'
+        required: false
+        default: 'minimal'
+        type: string
+      skip_steps:
+        description: 'Steps to skip'
+        required: false
+        default: ''
+        type: string
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  # ==========================================================================
+  # Job 1: Validate E2E test infrastructure
+  # ==========================================================================
+  validate-e2e-setup:
+    name: Validate E2E Setup
+    runs-on: ubuntu-latest
+    outputs:
+      tests_exist: ${{ steps.check.outputs.tests_exist }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check E2E tests exist
+        id: check
+        run: |
+          if [ -d "tests/e2e/knowledge_tuning" ]; then
+            echo "tests_exist=true" >> $GITHUB_OUTPUT
+            echo "✅ E2E tests directory found"
+          else
+            echo "tests_exist=false" >> $GITHUB_OUTPUT
+            echo "❌ E2E tests directory not found"
+          fi
+
+      - name: Validate test files
+        run: |
+          echo "📁 E2E Test Structure:"
+          ls -la tests/e2e/knowledge_tuning/ || echo "Directory not found"
+
+  # ==========================================================================
+  # Job 2: Run non-GPU E2E tests (Data Processing, Knowledge Mixing)
+  # ==========================================================================
+  e2e-non-gpu:
+    name: E2E Tests (Non-GPU Steps)
+    runs-on: ubuntu-latest
+    needs: validate-e2e-setup
+    if: needs.validate-e2e-setup.outputs.tests_exist == 'true'
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest papermill nbformat nbclient ipykernel jupyter-client
+          pip install python-dotenv requests  # Common notebook dependencies
+
+      - name: Install Jupyter kernel
+        run: |
+          python -m ipykernel install --user --name python3
+
+      - name: Set test parameters
+        id: params
+        run: |
+          PROFILE="${{ github.event.inputs.profile || 'minimal' }}"
+          SKIP_STEPS="${{ github.event.inputs.skip_steps || '1,5,6' }}"
+
+          echo "profile=$PROFILE" >> $GITHUB_OUTPUT
+          echo "skip_steps=$SKIP_STEPS" >> $GITHUB_OUTPUT
+
+          echo "📋 Test Configuration:"
+          echo "   Profile: $PROFILE"
+          echo "   Skip Steps: $SKIP_STEPS"
+
+      - name: Run E2E dry-run
+        run: |
+          cd tests/e2e/knowledge_tuning
+          python run_e2e.py --dry-run --profile ${{ steps.params.outputs.profile }}
+
+      - name: Run E2E tests (non-GPU steps)
+        id: e2e_test
+        run: |
+          pytest tests/e2e/knowledge_tuning/ \
+            -v \
+            --tb=short \
+            --e2e-profile=${{ steps.params.outputs.profile }} \
+            --skip-steps=${{ steps.params.outputs.skip_steps }} \
+            --junit-xml=e2e-results.xml \
+            2>&1 | tee e2e-output.txt
+        continue-on-error: true
+
+      - name: Check test results
+        run: |
+          if grep -q "FAILED" e2e-output.txt; then
+            echo "❌ Some E2E tests failed"
+            exit 1
+          elif grep -q "passed" e2e-output.txt; then
+            echo "✅ E2E tests passed"
+          else
+            echo "⚠️ Could not determine test status"
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-non-gpu-results
+          path: |
+            e2e-results.xml
+            e2e-output.txt
+          retention-days: 7
+
+      - name: Generate test summary
+        if: always()
+        run: |
+          echo "## E2E Test Results (Non-GPU Steps)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Profile:** ${{ steps.params.outputs.profile }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Skipped Steps:** ${{ steps.params.outputs.skip_steps }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -20 e2e-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ==========================================================================
+  # Job 3: Run full E2E pipeline on GPU runner (optional)
+  # ==========================================================================
+  e2e-full-pipeline:
+    name: E2E Full Pipeline (GPU)
+    # Only run on self-hosted GPU runner when explicitly requested
+    runs-on: ${{ github.event.inputs.runner == 'self-hosted-gpu' && 'self-hosted-gpu' || github.event.inputs.runner == 'self-hosted-rhoai' && 'self-hosted-rhoai' || 'ubuntu-latest' }}
+    needs: validate-e2e-setup
+    if: |
+      needs.validate-e2e-setup.outputs.tests_exist == 'true' &&
+      github.event.inputs.run_full_pipeline == 'true'
+    timeout-minutes: 180  # 3 hours for full pipeline
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Check GPU availability
+        run: |
+          if command -v nvidia-smi &> /dev/null; then
+            echo "✅ GPU detected:"
+            nvidia-smi
+          else
+            echo "⚠️ No GPU detected - some tests may fail"
+          fi
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest papermill nbformat nbclient ipykernel jupyter-client
+          pip install torch transformers accelerate  # ML dependencies
+          pip install python-dotenv requests pandas
+
+      - name: Install Jupyter kernel
+        run: |
+          python -m ipykernel install --user --name python3
+
+      - name: Run full E2E pipeline
+        id: full_e2e
+        run: |
+          pytest tests/e2e/knowledge_tuning/test_e2e_pipeline.py::TestKnowledgeTuningE2EPipeline \
+            -v \
+            --tb=long \
+            --e2e-profile=${{ github.event.inputs.profile || 'minimal' }} \
+            --keep-outputs \
+            --junit-xml=e2e-full-results.xml \
+            2>&1 | tee e2e-full-output.txt
+        continue-on-error: true
+
+      - name: Collect execution report
+        if: always()
+        run: |
+          # Find and copy execution report
+          find . -name "e2e_execution_report.json" -exec cp {} ./e2e_execution_report.json \; 2>/dev/null || true
+          find . -name "e2e_report.json" -exec cp {} ./e2e_report.json \; 2>/dev/null || true
+
+      - name: Upload full pipeline results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-full-pipeline-results
+          path: |
+            e2e-full-results.xml
+            e2e-full-output.txt
+            e2e_execution_report.json
+            e2e_report.json
+          retention-days: 14
+
+      - name: Generate full pipeline summary
+        if: always()
+        run: |
+          echo "## E2E Full Pipeline Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Profile:** ${{ github.event.inputs.profile || 'minimal' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Runner:** ${{ github.event.inputs.runner }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f "e2e_execution_report.json" ]; then
+            echo "### Execution Report" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat e2e_execution_report.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -50 e2e-full-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ==========================================================================
+  # Job 4: RHOAI Integration Test (on self-hosted RHOAI runner)
+  # ==========================================================================
+  e2e-rhoai:
+    name: E2E on RHOAI Cluster
+    runs-on: self-hosted-rhoai
+    needs: validate-e2e-setup
+    if: |
+      needs.validate-e2e-setup.outputs.tests_exist == 'true' &&
+      github.event.inputs.runner == 'self-hosted-rhoai'
+    timeout-minutes: 240  # 4 hours
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify RHOAI environment
+        run: |
+          echo "🔍 Checking RHOAI environment..."
+          python --version
+          pip --version
+
+          # Check for GPU
+          python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')" || echo "PyTorch not installed"
+
+      - name: Install dependencies
+        run: |
+          pip install pytest papermill nbformat nbclient ipykernel
+          # Install example-specific dependencies
+          pip install -r examples/knowledge-tuning/01_Base_Model_Evaluation/requirements.txt 2>/dev/null || true
+
+      - name: Run RHOAI E2E tests
+        run: |
+          python tests/e2e/knowledge_tuning/run_e2e.py \
+            --profile ${{ github.event.inputs.profile || 'minimal' }} \
+            --output-dir ./rhoai_e2e_output \
+            2>&1 | tee rhoai-e2e-output.txt
+
+      - name: Upload RHOAI results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-rhoai-results
+          path: |
+            rhoai-e2e-output.txt
+            rhoai_e2e_output/
+          retention-days: 14
+
+  # ==========================================================================
+  # Job 5: Report aggregation
+  # ==========================================================================
+  aggregate-results:
+    name: Aggregate E2E Results
+    runs-on: ubuntu-latest
+    needs: [e2e-non-gpu, e2e-full-pipeline, e2e-rhoai]
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Generate combined report
+        run: |
+          echo "## E2E Test Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Non-GPU Tests | ${{ needs.e2e-non-gpu.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Full Pipeline | ${{ needs.e2e-full-pipeline.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| RHOAI Tests | ${{ needs.e2e-rhoai.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Artifacts" >> $GITHUB_STEP_SUMMARY
+          ls -la ./artifacts/ 2>/dev/null || echo "No artifacts found" >> $GITHUB_STEP_SUMMARY

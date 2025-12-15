@@ -1,0 +1,232 @@
+# =============================================================================
+# OpenShift Pipeline (Tekton) for E2E Testing on RHOAI
+# =============================================================================
+# This defines a Tekton Pipeline that runs E2E tests natively on OpenShift/RHOAI.
+#
+# Prerequisites:
+# - OpenShift Pipelines operator installed
+# - RHOAI configured with GPU nodes
+# - PVC for workspace storage
+#
+# Usage:
+#   oc apply -f openshift-pipeline.yaml
+#   oc create -f pipeline-run.yaml
+# =============================================================================
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: e2e-workspace-pvc
+  namespace: e2e-tests
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: e2e-notebook-test
+  namespace: e2e-tests
+spec:
+  description: Run E2E notebook tests on RHOAI
+  params:
+    - name: git-url
+      type: string
+      description: Git repository URL
+      default: "https://github.com/red-hat-data-services/red-hat-ai-examples.git"
+    - name: git-revision
+      type: string
+      description: Git branch or tag
+      default: "main"
+    - name: test-profile
+      type: string
+      description: Test profile (minimal/standard/extended)
+      default: "minimal"
+    - name: skip-steps
+      type: string
+      description: Steps to skip (comma-separated)
+      default: ""
+  workspaces:
+    - name: source
+      description: Workspace for source code and outputs
+  results:
+    - name: test-result
+      description: Test execution result (passed/failed)
+    - name: steps-passed
+      description: Number of steps passed
+    - name: steps-failed
+      description: Number of steps failed
+  steps:
+    - name: clone-repo
+      image: gcr.io/tekton-releases/github.com/tektoncd/pipeline/cmd/git-init:latest
+      script: |
+        #!/bin/bash
+        set -e
+        echo "📥 Cloning repository..."
+        git clone $(params.git-url) $(workspaces.source.path)/repo
+        cd $(workspaces.source.path)/repo
+        git checkout $(params.git-revision)
+        echo "✅ Repository cloned"
+
+    - name: setup-environment
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      workingDir: $(workspaces.source.path)/repo
+      script: |
+        #!/bin/bash
+        set -e
+        echo "🔧 Setting up Python environment..."
+
+        pip install --upgrade pip
+        pip install pytest papermill nbformat nbclient ipykernel jupyter-client
+        pip install python-dotenv torch transformers accelerate
+
+        python -m ipykernel install --user --name python3
+
+        echo "✅ Environment ready"
+
+        # Check GPU
+        python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')" || echo "No GPU"
+
+    - name: run-e2e-tests
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      workingDir: $(workspaces.source.path)/repo
+      resources:
+        requests:
+          nvidia.com/gpu: 1
+          memory: "16Gi"
+          cpu: "4"
+        limits:
+          nvidia.com/gpu: 1
+          memory: "32Gi"
+          cpu: "8"
+      script: |
+        #!/bin/bash
+        set -e
+        echo "🚀 Running E2E tests..."
+        echo "   Profile: $(params.test-profile)"
+        echo "   Skip steps: $(params.skip-steps)"
+
+        cd tests/e2e/knowledge_tuning
+
+        SKIP_ARGS=""
+        if [ -n "$(params.skip-steps)" ]; then
+          SKIP_ARGS="--skip-steps=$(params.skip-steps)"
+        fi
+
+        python run_e2e.py \
+          --profile $(params.test-profile) \
+          $SKIP_ARGS \
+          --output-dir $(workspaces.source.path)/e2e-output \
+          2>&1 | tee $(workspaces.source.path)/e2e-output.txt
+
+        # Parse results
+        if grep -q "Failed: 0" $(workspaces.source.path)/e2e-output.txt; then
+          echo "passed" > $(results.test-result.path)
+        else
+          echo "failed" > $(results.test-result.path)
+        fi
+
+    - name: collect-results
+      image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/bash
+        echo "📊 Collecting results..."
+
+        if [ -f "e2e-output/e2e_report.json" ]; then
+          cat e2e-output/e2e_report.json
+
+          # Extract metrics
+          PASSED=$(python3 -c "import json; d=json.load(open('e2e-output/e2e_report.json')); print(d['summary']['passed'])")
+          FAILED=$(python3 -c "import json; d=json.load(open('e2e-output/e2e_report.json')); print(d['summary']['failed'])")
+
+          echo "$PASSED" > $(results.steps-passed.path)
+          echo "$FAILED" > $(results.steps-failed.path)
+        else
+          echo "0" > $(results.steps-passed.path)
+          echo "0" > $(results.steps-failed.path)
+        fi
+
+        echo "✅ Results collected"
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: e2e-knowledge-tuning-pipeline
+  namespace: e2e-tests
+spec:
+  description: E2E test pipeline for knowledge-tuning workflow
+  params:
+    - name: git-url
+      type: string
+      default: "https://github.com/red-hat-data-services/red-hat-ai-examples.git"
+    - name: git-revision
+      type: string
+      default: "main"
+    - name: test-profile
+      type: string
+      default: "minimal"
+    - name: skip-steps
+      type: string
+      default: ""
+  workspaces:
+    - name: shared-workspace
+  tasks:
+    - name: run-e2e-tests
+      taskRef:
+        name: e2e-notebook-test
+      params:
+        - name: git-url
+          value: $(params.git-url)
+        - name: git-revision
+          value: $(params.git-revision)
+        - name: test-profile
+          value: $(params.test-profile)
+        - name: skip-steps
+          value: $(params.skip-steps)
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+  finally:
+    - name: report-results
+      taskRef:
+        name: e2e-notebook-test
+      params:
+        - name: git-url
+          value: $(params.git-url)
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+---
+# Example PipelineRun to trigger the E2E tests
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  generateName: e2e-knowledge-tuning-run-
+  namespace: e2e-tests
+spec:
+  pipelineRef:
+    name: e2e-knowledge-tuning-pipeline
+  params:
+    - name: git-url
+      value: "https://github.com/red-hat-data-services/red-hat-ai-examples.git"
+    - name: git-revision
+      value: "main"
+    - name: test-profile
+      value: "minimal"
+    - name: skip-steps
+      value: ""
+  workspaces:
+    - name: shared-workspace
+      persistentVolumeClaim:
+        claimName: e2e-workspace-pvc
+  podTemplate:
+    tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+    nodeSelector:
+      nvidia.com/gpu.present: "true"

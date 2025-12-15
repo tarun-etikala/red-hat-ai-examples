@@ -1,0 +1,463 @@
+name: E2E Tests on RHOAI
+
+# =============================================================================
+# This workflow triggers E2E tests on an actual RHOAI cluster.
+# GitHub Actions orchestrates the test run, but execution happens on RHOAI.
+#
+# Flow:
+# 1. GitHub Actions authenticates to OpenShift/RHOAI cluster
+# 2. Creates a Kubernetes Job on RHOAI
+# 3. Waits for the Job to complete
+# 4. Retrieves logs and results
+# 5. Reports status back to GitHub
+# =============================================================================
+
+on:
+  # Nightly run at 2 AM UTC
+  schedule:
+    - cron: '0 2 * * *'
+
+  # Manual trigger with parameters
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Test profile'
+        required: true
+        default: 'minimal'
+        type: choice
+        options:
+          - minimal
+          - standard
+          - extended
+      skip_steps:
+        description: 'Steps to skip (comma-separated, e.g., "1,5,6")'
+        required: false
+        default: ''
+        type: string
+      git_branch:
+        description: 'Git branch to test'
+        required: false
+        default: 'main'
+        type: string
+      timeout_minutes:
+        description: 'Job timeout in minutes'
+        required: false
+        default: '120'
+        type: string
+
+  # Trigger on PRs to knowledge-tuning (optional)
+  pull_request:
+    branches: [main]
+    paths:
+      - 'examples/knowledge-tuning/**'
+    types: [labeled]  # Only when 'e2e-test' label is added
+
+env:
+  # OpenShift/RHOAI configuration
+  OPENSHIFT_NAMESPACE: e2e-tests
+  JOB_NAME_PREFIX: e2e-github
+
+  # Test configuration defaults
+  DEFAULT_PROFILE: minimal
+  DEFAULT_GIT_BRANCH: main
+
+jobs:
+  # ==========================================================================
+  # Job 1: Trigger E2E tests on RHOAI cluster
+  # ==========================================================================
+  trigger-rhoai-tests:
+    name: Run E2E on RHOAI
+    runs-on: ubuntu-latest
+    timeout-minutes: 180  # 3 hours max
+
+    # Only run on labeled PRs or scheduled/manual triggers
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-test'))
+
+    outputs:
+      job_name: ${{ steps.create-job.outputs.job_name }}
+      test_result: ${{ steps.wait-job.outputs.result }}
+      steps_passed: ${{ steps.get-results.outputs.passed }}
+      steps_failed: ${{ steps.get-results.outputs.failed }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install OpenShift CLI
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: '4.14'
+
+      - name: Log in to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ secrets.OPENSHIFT_SERVER }}
+          openshift_token: ${{ secrets.OPENSHIFT_TOKEN }}
+          insecure_skip_tls_verify: true
+          namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+
+      - name: Verify cluster connection
+        run: |
+          echo "🔗 Connected to OpenShift cluster"
+          oc whoami
+          oc project ${{ env.OPENSHIFT_NAMESPACE }} || oc new-project ${{ env.OPENSHIFT_NAMESPACE }}
+
+          echo ""
+          echo "📊 Cluster info:"
+          oc cluster-info | head -5
+
+      - name: Check GPU availability
+        run: |
+          echo "🖥️ Checking GPU nodes..."
+          oc get nodes -l nvidia.com/gpu.present=true -o wide || echo "No GPU-labeled nodes found"
+
+      - name: Set test parameters
+        id: params
+        run: |
+          # Set parameters from inputs or defaults
+          PROFILE="${{ github.event.inputs.profile || env.DEFAULT_PROFILE }}"
+          SKIP_STEPS="${{ github.event.inputs.skip_steps || '' }}"
+          GIT_BRANCH="${{ github.event.inputs.git_branch || env.DEFAULT_GIT_BRANCH }}"
+          TIMEOUT="${{ github.event.inputs.timeout_minutes || '120' }}"
+
+          # Generate unique job name
+          JOB_NAME="${{ env.JOB_NAME_PREFIX }}-${{ github.run_id }}-${{ github.run_attempt }}"
+
+          echo "profile=$PROFILE" >> $GITHUB_OUTPUT
+          echo "skip_steps=$SKIP_STEPS" >> $GITHUB_OUTPUT
+          echo "git_branch=$GIT_BRANCH" >> $GITHUB_OUTPUT
+          echo "timeout=$TIMEOUT" >> $GITHUB_OUTPUT
+          echo "job_name=$JOB_NAME" >> $GITHUB_OUTPUT
+
+          echo "📋 Test Configuration:"
+          echo "   Profile: $PROFILE"
+          echo "   Skip Steps: $SKIP_STEPS"
+          echo "   Git Branch: $GIT_BRANCH"
+          echo "   Timeout: ${TIMEOUT}m"
+          echo "   Job Name: $JOB_NAME"
+
+      - name: Create E2E Job on RHOAI
+        id: create-job
+        run: |
+          JOB_NAME="${{ steps.params.outputs.job_name }}"
+          TIMEOUT_SECONDS=$(( ${{ steps.params.outputs.timeout }} * 60 ))
+
+          echo "🚀 Creating E2E test job: $JOB_NAME"
+
+          cat <<EOF | oc apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB_NAME}
+            namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+            labels:
+              app: e2e-tests
+              trigger: github-actions
+              run-id: "${{ github.run_id }}"
+          spec:
+            activeDeadlineSeconds: ${TIMEOUT_SECONDS}
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 86400  # Clean up after 24 hours
+            template:
+              metadata:
+                labels:
+                  app: e2e-tests
+                  job-name: ${JOB_NAME}
+              spec:
+                restartPolicy: Never
+                tolerations:
+                  - key: "nvidia.com/gpu"
+                    operator: "Exists"
+                    effect: "NoSchedule"
+                nodeSelector:
+                  nvidia.com/gpu.present: "true"
+                containers:
+                  - name: e2e-runner
+                    image: quay.io/modh/runtime-images:runtime-cuda-tensorflow-ubi9-python-3.11-2024b-20241111
+                    resources:
+                      requests:
+                        nvidia.com/gpu: 1
+                        memory: "16Gi"
+                        cpu: "4"
+                      limits:
+                        nvidia.com/gpu: 1
+                        memory: "32Gi"
+                        cpu: "8"
+                    env:
+                      - name: GIT_REPO_URL
+                        value: "https://github.com/${{ github.repository }}.git"
+                      - name: GIT_BRANCH
+                        value: "${{ steps.params.outputs.git_branch }}"
+                      - name: TEST_PROFILE
+                        value: "${{ steps.params.outputs.profile }}"
+                      - name: SKIP_STEPS
+                        value: "${{ steps.params.outputs.skip_steps }}"
+                      - name: STUDENT_MODEL_NAME
+                        value: "HuggingFaceTB/SmolLM2-135M-Instruct"
+                      - name: TEACHER_MODEL_NAME
+                        value: "HuggingFaceTB/SmolLM2-135M-Instruct"
+                      - name: GITHUB_RUN_ID
+                        value: "${{ github.run_id }}"
+                    command:
+                      - /bin/bash
+                      - -c
+                      - |
+                        set -e
+
+                        echo "============================================"
+                        echo "E2E Knowledge-Tuning Tests on RHOAI"
+                        echo "============================================"
+                        echo "GitHub Run ID: \$GITHUB_RUN_ID"
+                        echo "Profile: \$TEST_PROFILE"
+                        echo "Branch: \$GIT_BRANCH"
+                        echo "Skip Steps: \$SKIP_STEPS"
+                        echo "Started: \$(date)"
+                        echo "============================================"
+
+                        # Setup workspace
+                        WORK_DIR="/tmp/e2e-\$GITHUB_RUN_ID"
+                        mkdir -p \$WORK_DIR
+                        cd \$WORK_DIR
+
+                        # Clone repository
+                        echo ""
+                        echo "📥 Cloning repository..."
+                        git clone \$GIT_REPO_URL repo
+                        cd repo
+                        git checkout \$GIT_BRANCH
+                        echo "✅ Checked out: \$(git rev-parse --short HEAD)"
+
+                        # Install dependencies
+                        echo ""
+                        echo "🔧 Installing dependencies..."
+                        pip install --upgrade pip -q
+                        pip install pytest papermill nbformat nbclient ipykernel jupyter-client -q
+                        pip install python-dotenv torch transformers accelerate -q
+                        python -m ipykernel install --user --name python3
+                        echo "✅ Dependencies installed"
+
+                        # Check GPU
+                        echo ""
+                        echo "🖥️ GPU Status:"
+                        python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU count: {torch.cuda.device_count()}')" || echo "PyTorch GPU check failed"
+                        nvidia-smi --query-gpu=name,memory.total --format=csv || echo "nvidia-smi not available"
+
+                        # Run E2E tests
+                        echo ""
+                        echo "🚀 Running E2E tests..."
+                        cd tests/e2e/knowledge_tuning
+
+                        SKIP_ARGS=""
+                        if [ -n "\$SKIP_STEPS" ]; then
+                          SKIP_ARGS="--skip-steps=\$SKIP_STEPS"
+                        fi
+
+                        # Run tests and capture output
+                        python run_e2e.py \\
+                          --profile \$TEST_PROFILE \\
+                          \$SKIP_ARGS \\
+                          --output-dir \$WORK_DIR/results \\
+                          2>&1 | tee \$WORK_DIR/e2e-output.log
+
+                        TEST_EXIT_CODE=\$?
+
+                        # Print results summary
+                        echo ""
+                        echo "============================================"
+                        echo "E2E TEST RESULTS"
+                        echo "============================================"
+
+                        if [ -f "\$WORK_DIR/results/e2e_report.json" ]; then
+                          cat \$WORK_DIR/results/e2e_report.json
+                        fi
+
+                        echo ""
+                        echo "Exit Code: \$TEST_EXIT_CODE"
+                        echo "Finished: \$(date)"
+                        echo "============================================"
+
+                        exit \$TEST_EXIT_CODE
+          EOF
+
+          echo "✅ Job created"
+          echo "job_name=$JOB_NAME" >> $GITHUB_OUTPUT
+
+      - name: Wait for Job to start
+        run: |
+          JOB_NAME="${{ steps.params.outputs.job_name }}"
+          echo "⏳ Waiting for job to start..."
+
+          for i in {1..60}; do
+            STATUS=$(oc get job $JOB_NAME -o jsonpath='{.status.active}' 2>/dev/null || echo "0")
+            if [ "$STATUS" == "1" ]; then
+              echo "✅ Job is running"
+              break
+            fi
+
+            # Check if already completed
+            SUCCEEDED=$(oc get job $JOB_NAME -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "0")
+            FAILED=$(oc get job $JOB_NAME -o jsonpath='{.status.failed}' 2>/dev/null || echo "0")
+            if [ "$SUCCEEDED" == "1" ] || [ "$FAILED" == "1" ]; then
+              echo "Job already completed"
+              break
+            fi
+
+            echo "  Waiting... ($i/60)"
+            sleep 10
+          done
+
+      - name: Stream Job logs
+        run: |
+          JOB_NAME="${{ steps.params.outputs.job_name }}"
+          echo "📜 Streaming job logs..."
+          echo ""
+
+          # Wait for pod to be ready
+          POD_NAME=$(oc get pods -l job-name=$JOB_NAME -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+          if [ -n "$POD_NAME" ]; then
+            echo "Pod: $POD_NAME"
+            oc logs -f $POD_NAME --timestamps || echo "Log streaming ended"
+          else
+            echo "⚠️ Could not find pod for job"
+          fi
+
+      - name: Wait for Job completion
+        id: wait-job
+        run: |
+          JOB_NAME="${{ steps.params.outputs.job_name }}"
+          TIMEOUT=${{ steps.params.outputs.timeout }}
+
+          echo "⏳ Waiting for job completion (timeout: ${TIMEOUT}m)..."
+
+          # Wait for job to complete
+          oc wait --for=condition=complete job/$JOB_NAME --timeout=${TIMEOUT}m || true
+
+          # Check final status
+          SUCCEEDED=$(oc get job $JOB_NAME -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "0")
+          FAILED=$(oc get job $JOB_NAME -o jsonpath='{.status.failed}' 2>/dev/null || echo "0")
+
+          if [ "$SUCCEEDED" == "1" ]; then
+            echo "✅ Job completed successfully"
+            echo "result=success" >> $GITHUB_OUTPUT
+          elif [ "$FAILED" == "1" ]; then
+            echo "❌ Job failed"
+            echo "result=failure" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Job status unknown"
+            echo "result=unknown" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get test results
+        id: get-results
+        if: always()
+        run: |
+          JOB_NAME="${{ steps.params.outputs.job_name }}"
+
+          echo "📊 Retrieving test results..."
+
+          # Get pod name
+          POD_NAME=$(oc get pods -l job-name=$JOB_NAME -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+          if [ -n "$POD_NAME" ]; then
+            # Try to extract results from logs
+            oc logs $POD_NAME > job-output.log 2>/dev/null || true
+
+            # Parse results
+            PASSED=$(grep -oP 'Passed: \K\d+' job-output.log | tail -1 || echo "0")
+            FAILED=$(grep -oP 'Failed: \K\d+' job-output.log | tail -1 || echo "0")
+
+            echo "passed=$PASSED" >> $GITHUB_OUTPUT
+            echo "failed=$FAILED" >> $GITHUB_OUTPUT
+
+            echo "Results: Passed=$PASSED, Failed=$FAILED"
+          else
+            echo "passed=0" >> $GITHUB_OUTPUT
+            echo "failed=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Save logs artifact
+        if: always()
+        run: |
+          JOB_NAME="${{ steps.params.outputs.job_name }}"
+          mkdir -p artifacts
+
+          # Get full logs
+          POD_NAME=$(oc get pods -l job-name=$JOB_NAME -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$POD_NAME" ]; then
+            oc logs $POD_NAME > artifacts/e2e-full-log.txt 2>/dev/null || true
+          fi
+
+          # Get job description
+          oc describe job $JOB_NAME > artifacts/job-description.txt 2>/dev/null || true
+
+          # Get pod events
+          oc get events --field-selector involvedObject.name=$POD_NAME > artifacts/pod-events.txt 2>/dev/null || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rhoai-e2e-results-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 14
+
+      - name: Cleanup (optional)
+        if: always() && github.event.inputs.cleanup != 'false'
+        run: |
+          JOB_NAME="${{ steps.params.outputs.job_name }}"
+          echo "🧹 Job will be auto-cleaned after 24 hours (ttlSecondsAfterFinished)"
+          # Optionally delete immediately:
+          # oc delete job $JOB_NAME --ignore-not-found
+
+      - name: Report status
+        if: always()
+        run: |
+          RESULT="${{ steps.wait-job.outputs.result }}"
+          PASSED="${{ steps.get-results.outputs.passed }}"
+          FAILED="${{ steps.get-results.outputs.failed }}"
+
+          echo "## E2E Test Results on RHOAI" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Result** | $RESULT |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Steps Passed** | $PASSED |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Steps Failed** | $FAILED |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Profile** | ${{ steps.params.outputs.profile }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | ${{ steps.params.outputs.git_branch }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **RHOAI Job** | ${{ steps.params.outputs.job_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$RESULT" == "success" ]; then
+            echo "✅ **All E2E tests passed on RHOAI!**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **E2E tests failed on RHOAI**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Fail if tests failed
+        if: steps.wait-job.outputs.result != 'success'
+        run: |
+          echo "❌ E2E tests failed on RHOAI"
+          exit 1
+
+  # ==========================================================================
+  # Job 2: Notify on failure (optional)
+  # ==========================================================================
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: trigger-rhoai-tests
+    if: failure() && github.event_name == 'schedule'
+
+    steps:
+      - name: Send notification
+        run: |
+          echo "📧 E2E tests failed - notification would be sent here"
+          # Add Slack/email notification here if needed
+          # Example: curl -X POST -H 'Content-type: application/json' \
+          #   --data '{"text":"E2E tests failed on RHOAI!"}' \
+          #   ${{ secrets.SLACK_WEBHOOK_URL }}
