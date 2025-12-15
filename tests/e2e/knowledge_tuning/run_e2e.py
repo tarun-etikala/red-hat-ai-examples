@@ -15,6 +15,7 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -51,18 +52,68 @@ def check_dependencies():
         print(f"   Install with: pip install {' '.join(missing)}")
         sys.exit(1)
 
-    print("✅ All dependencies available")
+    print("✅ Core dependencies available")
 
 
-def run_notebook(notebook_path: Path, output_path: Path, env_vars: dict, timeout: int):
-    """Execute a single notebook using papermill."""
+def install_notebook_dependencies(notebook_dir: Path) -> bool:
+    """Install dependencies from pyproject.toml in the notebook directory."""
+    pyproject_path = notebook_dir / "pyproject.toml"
+
+    if not pyproject_path.exists():
+        print(f"   ⚠️ No pyproject.toml found in {notebook_dir.name}")
+        return True
+
+    print(f"   📦 Installing dependencies from {notebook_dir.name}/pyproject.toml...")
+
+    try:
+        # Install the package in the notebook directory
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "-e", str(notebook_dir)],
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout
+        )
+
+        if result.returncode != 0:
+            # Try alternative: install from pyproject.toml directly
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", str(notebook_dir)],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+
+        if result.returncode == 0:
+            print(f"   ✅ Dependencies installed for {notebook_dir.name}")
+            return True
+        else:
+            print(f"   ⚠️ Dependency install had issues: {result.stderr[:200]}")
+            # Continue anyway - some deps might already be installed
+            return True
+
+    except subprocess.TimeoutExpired:
+        print(f"   ⚠️ Dependency installation timed out for {notebook_dir.name}")
+        return True
+    except Exception as e:
+        print(f"   ⚠️ Error installing dependencies: {e}")
+        return True
+
+
+def run_notebook(notebook_path: Path, output_path: Path, timeout: int):
+    """Execute a single notebook using papermill.
+
+    Note: We don't pass parameters to papermill because the notebooks
+    don't have parameter cells. Instead, configuration is passed via
+    environment variables which are set before calling this function.
+    """
     import papermill as pm
 
     try:
+        # Execute notebook without passing parameters
+        # (notebooks read config from environment variables)
         pm.execute_notebook(
             str(notebook_path),
             str(output_path),
-            parameters=env_vars,
             cwd=str(notebook_path.parent),
             kernel_name="python3",
             progress_bar=True,
@@ -125,6 +176,23 @@ def main():
         default=None,
         help="Override teacher model name",
     )
+    parser.add_argument(
+        "--stop-on-failure",
+        action="store_true",
+        default=True,
+        help="Stop execution if a step fails (default: True)",
+    )
+    parser.add_argument(
+        "--no-stop-on-failure",
+        action="store_false",
+        dest="stop_on_failure",
+        help="Continue execution even if a step fails",
+    )
+    parser.add_argument(
+        "--skip-deps",
+        action="store_true",
+        help="Skip installing notebook dependencies",
+    )
 
     args = parser.parse_args()
 
@@ -159,6 +227,7 @@ def main():
     print(f"   Teacher Model: {config.teacher_model_name}")
     print(f"   Max Steps: {config.max_steps}")
     print(f"   Max Samples: {config.max_samples}")
+    print(f"   Stop on failure: {args.stop_on_failure}")
 
     # Determine which steps to run
     knowledge_tuning_path = repo_root / "examples" / "knowledge-tuning"
@@ -194,10 +263,15 @@ def main():
         print("\n✅ Dry run complete. Remove --dry-run to execute.")
         return
 
-    # Set environment variables
+    # Set environment variables for notebooks to read
     env_vars = config.get_env_vars()
     for key, value in env_vars.items():
         os.environ[key] = value
+
+    print("\n🔧 Environment variables set:")
+    for key in ["STUDENT_MODEL_NAME", "TEACHER_MODEL_NAME", "E2E_TEST_MODE"]:
+        if key in os.environ:
+            print(f"   {key}={os.environ[key]}")
 
     # Execute notebooks
     results = []
@@ -211,6 +285,12 @@ def main():
         print(f"{'─' * 50}")
 
         notebook_path = knowledge_tuning_path / step.notebook_path
+        notebook_dir = notebook_path.parent
+
+        # Install dependencies for this notebook
+        if not args.skip_deps:
+            install_notebook_dependencies(notebook_dir)
+
         output_notebook = (
             output_dir
             / f"executed_{step.step_number:02d}_{step.name.replace(' ', '_')}.ipynb"
@@ -220,7 +300,6 @@ def main():
         result = run_notebook(
             notebook_path=notebook_path,
             output_path=output_notebook,
-            env_vars=env_vars,
             timeout=step.timeout_override or config.notebook_timeout,
         )
         duration = (datetime.now() - start_time).total_seconds()
@@ -235,6 +314,12 @@ def main():
         else:
             print(f"❌ Failed after {duration:.1f}s")
             print(f"   Error: {result['error']}")
+
+            if args.stop_on_failure:
+                print(
+                    "\n⛔ Stopping due to failure (use --no-stop-on-failure to continue)"
+                )
+                break
 
     # Summary
     passed = sum(1 for r in results if r["success"])
