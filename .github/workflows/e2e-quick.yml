@@ -1,0 +1,79 @@
+name: E2E Quick Validation
+
+# This workflow runs quick E2E validation on PRs that modify the knowledge-tuning example
+# It only runs non-GPU steps to provide fast feedback
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'examples/knowledge-tuning/**'
+      - 'tests/e2e/**'
+      - '.github/workflows/e2e-*.yml'
+
+  push:
+    branches: [main]
+    paths:
+      - 'examples/knowledge-tuning/**'
+      - 'tests/e2e/**'
+
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  e2e-quick-validation:
+    name: E2E Quick Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest papermill nbformat nbclient ipykernel jupyter-client
+          pip install python-dotenv
+
+      - name: Install Jupyter kernel
+        run: |
+          python -m ipykernel install --user --name python3
+
+      - name: Verify E2E test discovery
+        run: |
+          echo "🔍 Discovering E2E tests..."
+          pytest tests/e2e/knowledge_tuning/ --collect-only -q
+
+      - name: Run E2E dry-run
+        run: |
+          echo "📋 E2E Configuration (dry-run):"
+          cd tests/e2e/knowledge_tuning
+          python run_e2e.py --dry-run --profile minimal
+
+      - name: Run E2E structure tests
+        run: |
+          pytest tests/e2e/knowledge_tuning/test_e2e_pipeline.py::TestPipelineResilience -v
+
+      - name: Validate notebook readability
+        run: |
+          pytest tests/e2e/knowledge_tuning/test_e2e_pipeline.py::TestPipelineResilience::test_all_notebooks_are_readable -v
+
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "## E2E Quick Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ E2E test infrastructure validated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To run full E2E tests, use the **E2E Pipeline Tests** workflow with:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`run_full_pipeline: true\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`runner: self-hosted-gpu\` or \`self-hosted-rhoai\`" >> $GITHUB_STEP_SUMMARY

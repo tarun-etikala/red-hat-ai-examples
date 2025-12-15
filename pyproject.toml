@@ -18,6 +18,16 @@ test = [
     "polars>=1.17.0",
 ]
 
+# E2E testing dependencies for RHOAI notebook execution
+e2e = [
+    "pytest>=8.3.0",
+    "papermill>=2.6.0",
+    "nbformat>=5.10.0",
+    "nbclient>=0.10.0",
+    "ipykernel>=6.29.0",
+    "jupyter-client>=8.6.0",
+]
+
 dev = [
     "ruff>=0.8.0",
     "pre-commit>=4.0.0",
@@ -38,6 +48,9 @@ markers = [
     "validation: Validation tests for notebook structure",
     "slow: Tests that take longer to run",
     "integration: Integration tests",
+    "e2e: End-to-end pipeline tests",
+    "rhoai: Tests that run on RHOAI cluster",
+    "gpu: Tests that require GPU resources",
 ]
 
 # Output options
