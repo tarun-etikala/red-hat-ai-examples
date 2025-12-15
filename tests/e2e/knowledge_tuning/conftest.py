@@ -162,12 +162,36 @@ def e2e_workspace(
             os.environ.pop(key, None)
 
 
+def install_notebook_dependencies(notebook_dir: Path) -> bool:
+    """Install dependencies from pyproject.toml in the notebook directory."""
+    import subprocess
+    import sys
+
+    pyproject_path = notebook_dir / "pyproject.toml"
+
+    if not pyproject_path.exists():
+        return True
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", str(notebook_dir)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        return result.returncode == 0
+    except Exception:
+        return True  # Continue even if install fails
+
+
 @pytest.fixture(scope="session")
 def notebook_executor(e2e_config, e2e_workspace):
     """
     Provides a notebook execution utility.
 
     Returns a callable that executes notebooks with proper configuration.
+    Note: Environment variables are set in the e2e_workspace fixture.
+    Notebooks read configuration from environment variables, not papermill parameters.
     """
     try:
         import papermill as pm
@@ -179,6 +203,7 @@ def notebook_executor(e2e_config, e2e_workspace):
         output_path: Path,
         parameters: dict = None,
         timeout: int = None,
+        install_deps: bool = True,
     ) -> dict:
         """
         Execute a notebook using papermill.
@@ -186,26 +211,23 @@ def notebook_executor(e2e_config, e2e_workspace):
         Args:
             notebook_path: Path to the input notebook
             output_path: Path to save the executed notebook
-            parameters: Optional parameters to inject
+            parameters: Optional parameters (unused - kept for API compatibility)
             timeout: Execution timeout in seconds
+            install_deps: Whether to install notebook dependencies first
 
         Returns:
             dict with execution results
         """
-        if parameters is None:
-            parameters = {}
-
-        # Merge with test config parameters
-        all_parameters = {
-            **e2e_config.get_env_vars(),
-            **parameters,
-        }
+        # Install dependencies from notebook's pyproject.toml
+        if install_deps:
+            install_notebook_dependencies(notebook_path.parent)
 
         try:
+            # Execute notebook WITHOUT passing parameters
+            # Notebooks read config from environment variables set in e2e_workspace
             result_nb = pm.execute_notebook(
                 str(notebook_path),
                 str(output_path),
-                parameters=all_parameters,
                 cwd=str(notebook_path.parent),
                 kernel_name="python3",
                 progress_bar=False,
