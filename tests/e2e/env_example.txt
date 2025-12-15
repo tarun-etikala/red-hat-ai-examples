@@ -1,0 +1,39 @@
+# RHOAI E2E Testing Environment Variables
+#
+# Copy these variables to your shell or .env file:
+#
+# Then load before running tests:
+#   source your-env-file
+#   pytest tests/e2e/ -v
+
+# Required: RHOAI Cluster API URL
+# Get from: oc whoami --show-server
+export RHOAI_API_URL="https://api.your-cluster.example.com:6443"
+
+# Required: Authentication Token
+# Get from: oc whoami -t
+# Or create a service account token for CI
+export RHOAI_TOKEN="sha256~your-token-here"
+
+# Optional: Default namespace for tests
+# Tests will create isolated namespaces, but this sets the base
+export RHOAI_NAMESPACE="e2e-test"
+
+# Optional: SSL verification (set to false for self-signed certs)
+export RHOAI_VERIFY_SSL="false"
+
+# Optional: Jupyter server URL (for Jupyter Server strategy)
+# Get from the workbench route in RHOAI dashboard
+export JUPYTER_SERVER_URL="https://workbench-name-namespace.apps.cluster.example.com"
+export JUPYTER_TOKEN="your-jupyter-token"
+
+# Optional: Hardware profile for tests
+# Options: small, medium, gpu_small, gpu_large
+export TEST_HARDWARE_PROFILE="gpu_large"
+
+# Optional: Specific notebook image
+export TEST_NOTEBOOK_IMAGE="quay.io/modh/odh-generic-data-science-notebook:v3-20241111"
+
+# Optional: Timeout overrides (in seconds)
+export TEST_TIMEOUT_NOTEBOOK="3600"
+export TEST_TIMEOUT_PIPELINE="14400"

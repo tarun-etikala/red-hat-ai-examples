@@ -1,0 +1,83 @@
+# RHOAI Cluster Profiles for E2E Testing
+#
+# This file defines cluster configurations for different environments.
+# Copy this file to cluster_profiles_local.yaml and fill in your credentials.
+
+profiles:
+  # Development/POC cluster
+  development:
+    api_url: ""  # Set via RHOAI_API_URL env var
+    namespace: "e2e-test-dev"
+    verify_ssl: false
+    description: "Development cluster for POC testing"
+
+  # Production testing cluster
+  production:
+    api_url: ""  # Set via RHOAI_API_URL env var
+    namespace: "e2e-test-prod"
+    verify_ssl: true
+    description: "Production-like cluster for release testing"
+
+  # Disconnected environment
+  disconnected:
+    api_url: ""
+    namespace: "e2e-test-disconnected"
+    verify_ssl: true
+    network_policy: "restricted"
+    description: "Air-gapped environment for enterprise testing"
+
+# Hardware profiles for workbenches
+hardware_profiles:
+  small:
+    cpu: "4"
+    memory: "16Gi"
+    gpu: 0
+    storage: "50Gi"
+    description: "For smoke tests and light workloads"
+
+  medium:
+    cpu: "8"
+    memory: "32Gi"
+    gpu: 0
+    storage: "100Gi"
+    description: "For integration tests without GPU"
+
+  gpu_small:
+    cpu: "16"
+    memory: "64Gi"
+    gpu: 1
+    gpu_type: "nvidia.com/gpu"
+    storage: "100Gi"
+    description: "Single GPU for inference tests"
+
+  gpu_large:
+    cpu: "100"
+    memory: "100Gi"
+    gpu: 1
+    gpu_type: "nvidia.com/gpu"
+    storage: "200Gi"
+    description: "For training workloads (knowledge-tuning)"
+
+# Notebook images available on RHOAI
+notebook_images:
+  default:
+    image: "quay.io/modh/odh-generic-data-science-notebook:v3-20241111"
+    description: "Standard data science notebook"
+
+  pytorch:
+    image: "quay.io/modh/odh-pytorch-notebook:v3-20241111"
+    description: "PyTorch-enabled notebook"
+
+  tensorflow:
+    image: "quay.io/modh/odh-tensorflow-notebook:v3-20241111"
+    description: "TensorFlow-enabled notebook"
+
+# Test timeouts (in seconds)
+timeouts:
+  connection: 30
+  workbench_startup: 600
+  notebook_execution:
+    small: 300      # 5 min for simple notebooks
+    medium: 1800    # 30 min for medium complexity
+    large: 7200     # 2 hours for training
+    pipeline: 14400 # 4 hours for full E2E pipeline
