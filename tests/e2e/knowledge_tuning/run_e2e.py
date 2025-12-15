@@ -98,6 +98,10 @@ def install_notebook_dependencies(notebook_dir: Path) -> bool:
         print(f"   ⚠️ No dependencies found in {notebook_dir.name}/pyproject.toml")
         return True
 
+    # Fix NumPy version compatibility issues
+    # NumPy 2.x causes _ARRAY_API errors with many packages
+    deps = fix_dependency_versions(deps)
+
     print(f"   📋 Dependencies: {', '.join(deps[:5])}{'...' if len(deps) > 5 else ''}")
 
     try:
@@ -123,6 +127,36 @@ def install_notebook_dependencies(notebook_dir: Path) -> bool:
     except Exception as e:
         print(f"   ⚠️ Error installing dependencies: {e}")
         return True
+
+
+def fix_dependency_versions(deps: list) -> list:
+    """Fix known version compatibility issues in dependencies.
+
+    This handles issues like:
+    - NumPy 2.x causing _ARRAY_API errors with many packages
+    - Other known incompatibilities
+    """
+    fixed_deps = []
+    numpy_added = False
+
+    for dep in deps:
+        dep_lower = dep.lower()
+
+        # Skip if numpy is already specified with a version
+        if dep_lower.startswith("numpy"):
+            # Replace with compatible version
+            fixed_deps.append("numpy<2.0")
+            numpy_added = True
+        else:
+            fixed_deps.append(dep)
+
+    # If numpy wasn't in deps but might be needed, add compatible version
+    # This ensures transitive numpy deps get the right version
+    if not numpy_added:
+        # Prepend numpy constraint to ensure it's installed first
+        fixed_deps.insert(0, "numpy<2.0")
+
+    return fixed_deps
 
 
 def run_notebook(notebook_path: Path, output_path: Path, timeout: int):

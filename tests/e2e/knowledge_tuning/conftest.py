@@ -184,6 +184,26 @@ def parse_pyproject_dependencies(pyproject_path: Path) -> list:
         return []
 
 
+def fix_dependency_versions(deps: list) -> list:
+    """Fix known version compatibility issues in dependencies."""
+    fixed_deps = []
+    numpy_added = False
+
+    for dep in deps:
+        dep_lower = dep.lower()
+        if dep_lower.startswith("numpy"):
+            fixed_deps.append("numpy<2.0")
+            numpy_added = True
+        else:
+            fixed_deps.append(dep)
+
+    # Add numpy constraint if not already present
+    if not numpy_added:
+        fixed_deps.insert(0, "numpy<2.0")
+
+    return fixed_deps
+
+
 def install_notebook_dependencies(notebook_dir: Path) -> bool:
     """Install dependencies from pyproject.toml in the notebook directory.
 
@@ -201,6 +221,9 @@ def install_notebook_dependencies(notebook_dir: Path) -> bool:
     deps = parse_pyproject_dependencies(pyproject_path)
     if not deps:
         return True
+
+    # Fix NumPy version compatibility
+    deps = fix_dependency_versions(deps)
 
     try:
         result = subprocess.run(
