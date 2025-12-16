@@ -51,19 +51,43 @@ Each notebook runs in a **separate Pod** for step isolation:
 
 | File | Description |
 |------|-------------|
-| `resources.yaml` | Namespace, PVCs, ServiceAccount |
+| `setup-admin.yaml` | **One-time admin setup** (namespace, RBAC) |
+| `resources.yaml` | PVCs for multi-pod mode |
 | `task-e2e-single-pod.yaml` | Single-pod Task (all steps in one Pod) |
 | `pipeline-single-pod.yaml` | Pipeline wrapper for single-pod mode |
 | `task-notebook-runner.yaml` | Multi-pod Task (one notebook per call) |
 | `pipeline-e2e.yaml` | Multi-pod Pipeline (6 TaskRuns) |
+| `trigger-pipeline.sh` | Helper script to trigger pipeline |
 
 ## Prerequisites
 
 1. **OpenShift Pipelines Operator** installed on RHOAI cluster
 2. **GPU nodes** available with label `nvidia.com/gpu.present=true`
-3. **GitHub Secrets** configured:
+3. **One-time admin setup** (see below)
+4. **GitHub Secrets** configured:
    - `OPENSHIFT_SERVER`: API server URL
    - `OPENSHIFT_TOKEN`: Service account token
+
+## One-Time Admin Setup
+
+A cluster administrator must run this **once** before using the pipeline:
+
+```bash
+# 1. Apply admin resources (namespace, service accounts, RBAC)
+oc apply -f setup-admin.yaml
+
+# 2. Generate a long-lived token for GitHub Actions
+oc create token github-actions -n e2e-tests --duration=8760h
+
+# 3. Save the token as OPENSHIFT_TOKEN secret in GitHub
+```
+
+This creates:
+
+- `e2e-tests` namespace
+- `github-actions` service account (for GitHub Actions)
+- `e2e-pipeline-sa` service account (for pipeline execution)
+- Required RBAC roles and bindings
 
 ## Quick Start
 

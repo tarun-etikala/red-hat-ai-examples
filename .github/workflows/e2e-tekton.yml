@@ -74,10 +74,19 @@ jobs:
           insecure_skip_tls_verify: true
           namespace: ${{ env.OPENSHIFT_NAMESPACE }}
 
-      - name: Create namespace if not exists
+      - name: Verify namespace exists
         run: |
-          oc get namespace ${{ env.OPENSHIFT_NAMESPACE }} || \
-          oc create namespace ${{ env.OPENSHIFT_NAMESPACE }}
+          if ! oc get namespace ${{ env.OPENSHIFT_NAMESPACE }} > /dev/null 2>&1; then
+            echo "❌ Namespace '${{ env.OPENSHIFT_NAMESPACE }}' does not exist!"
+            echo ""
+            echo "A cluster administrator must first run:"
+            echo "  oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/setup-admin.yaml"
+            echo ""
+            echo "Then create a token for GitHub Actions:"
+            echo "  oc create token github-actions -n e2e-tests --duration=8760h"
+            exit 1
+          fi
+          echo "✅ Namespace exists"
 
       - name: Apply Tekton resources
         run: |
@@ -85,8 +94,11 @@ jobs:
 
           MODE="${{ github.event.inputs.mode || 'single-pod' }}"
 
-          # Apply common resources (PVCs, ServiceAccount)
-          oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/resources.yaml
+          # Apply PVCs (only if multi-pod mode needs them)
+          if [ "$MODE" == "multi-pod" ]; then
+            echo "📦 Applying PVCs for multi-pod mode..."
+            oc apply -f tests/e2e/knowledge_tuning/rhoai/tekton/resources.yaml || true
+          fi
 
           if [ "$MODE" == "single-pod" ]; then
             echo "📦 Applying single-pod Task and Pipeline..."

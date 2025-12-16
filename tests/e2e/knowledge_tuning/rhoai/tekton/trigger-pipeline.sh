@@ -100,10 +100,27 @@ if ! oc whoami > /dev/null 2>&1; then
   exit 1
 fi
 
-# Apply Tekton resources
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Check if namespace exists (admin setup required)
+if ! oc get namespace "$NAMESPACE" > /dev/null 2>&1; then
+  echo "❌ Namespace '$NAMESPACE' does not exist!"
+  echo ""
+  echo "A cluster administrator must first run:"
+  echo "  oc apply -f $SCRIPT_DIR/setup-admin.yaml"
+  echo ""
+  echo "Then generate a token if needed:"
+  echo "  oc create token github-actions -n $NAMESPACE --duration=8760h"
+  exit 1
+fi
+
+# Apply Tekton resources
 echo "📦 Applying Tekton resources..."
-oc apply -f "$SCRIPT_DIR/resources.yaml"
+
+# Apply PVCs only for multi-pod mode
+if [ "$MODE" == "multi-pod" ]; then
+  oc apply -f "$SCRIPT_DIR/resources.yaml" || true
+fi
 
 if [ "$MODE" == "single-pod" ]; then
   oc apply -f "$SCRIPT_DIR/task-e2e-single-pod.yaml"
