@@ -1,0 +1,110 @@
+# =============================================================================
+# Tekton Admin Setup (ONE-TIME, requires cluster-admin)
+# =============================================================================
+# Run this ONCE by a cluster administrator:
+#   oc apply -f setup-admin.yaml
+# =============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: e2e-tests
+  labels:
+    app.kubernetes.io/name: e2e-tests
+---
+# Service account for GitHub Actions to use
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-actions
+  namespace: e2e-tests
+---
+# Service account for pipeline execution
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: e2e-pipeline-sa
+  namespace: e2e-tests
+---
+# Role for GitHub Actions (can create pipelines, tasks, pipelineruns)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: github-actions-role
+  namespace: e2e-tests
+rules:
+  # Tekton resources
+  - apiGroups: ["tekton.dev"]
+    resources: ["tasks", "pipelines", "pipelineruns", "taskruns"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Core resources
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "configmaps", "secrets", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events for monitoring
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+# Bind role to GitHub Actions SA
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-actions-rolebinding
+  namespace: e2e-tests
+subjects:
+  - kind: ServiceAccount
+    name: github-actions
+    namespace: e2e-tests
+roleRef:
+  kind: Role
+  name: github-actions-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Role for pipeline execution
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: e2e-pipeline-role
+  namespace: e2e-tests
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns", "taskruns"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+# Bind role to pipeline SA
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: e2e-pipeline-rolebinding
+  namespace: e2e-tests
+subjects:
+  - kind: ServiceAccount
+    name: e2e-pipeline-sa
+    namespace: e2e-tests
+roleRef:
+  kind: Role
+  name: e2e-pipeline-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Allow anyuid for CUDA containers (if needed)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: e2e-anyuid
+  namespace: e2e-tests
+subjects:
+  - kind: ServiceAccount
+    name: e2e-pipeline-sa
+    namespace: e2e-tests
+roleRef:
+  kind: ClusterRole
+  name: system:openshift:scc:anyuid
+  apiGroup: rbac.authorization.k8s.io
+---
+# Generate token for GitHub Actions (save this token as OPENSHIFT_TOKEN secret)
+# To get the token, run:
+#   oc create token github-actions -n e2e-tests --duration=8760h

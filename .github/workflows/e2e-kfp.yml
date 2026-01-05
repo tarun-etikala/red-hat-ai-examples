@@ -1,0 +1,179 @@
+name: E2E Tests via KFP on RHOAI
+
+# =============================================================================
+# This workflow runs E2E tests using Kubeflow Pipelines (KFP) on RHOAI.
+# It compiles a KFP pipeline and submits it to Data Science Pipelines.
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      pipeline:
+        description: 'Pipeline to run'
+        required: true
+        default: 'single-notebook'
+        type: choice
+        options:
+          - single-notebook
+          - full-e2e
+      notebook:
+        description: 'Notebook to test (single-notebook only)'
+        required: false
+        default: '02_Data_Processing'
+        type: choice
+        options:
+          - 01_Base_Model_Evaluation
+          - 02_Data_Processing
+          - 03_Knowledge_Generation
+          - 04_Knowledge_Mixing
+          - 05_Model_Training
+          - 06_Evaluation
+      git_branch:
+        description: 'Git branch to test'
+        required: false
+        default: 'main'
+        type: string
+      wait_for_completion:
+        description: 'Wait for pipeline to complete'
+        required: false
+        default: true
+        type: boolean
+
+  # Nightly run
+  schedule:
+    - cron: '0 4 * * *'  # 4 AM UTC daily
+
+env:
+  DSP_ROUTE: ${{ secrets.RHOAI_DSP_ROUTE }}  # Data Science Pipelines route
+
+jobs:
+  # ==========================================================================
+  # Job 1: Compile and Submit KFP Pipeline
+  # ==========================================================================
+  run-kfp-pipeline:
+    name: Run KFP Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install kfp==2.7.0
+
+      - name: Set notebook parameters
+        id: params
+        run: |  # pragma: allowlist secret
+          NOTEBOOK="${{ github.event.inputs.notebook || '02_Data_Processing' }}"
+
+          # Map notebook folder to paths
+          case $NOTEBOOK in
+            01_Base_Model_Evaluation)
+              NB_PATH="examples/knowledge-tuning/01_Base_Model_Evaluation/Base_Model_Evaluation.ipynb"
+              NB_DIR="examples/knowledge-tuning/01_Base_Model_Evaluation"
+              STEP_NAME="Base Model Evaluation"
+              ;;
+            02_Data_Processing)
+              NB_PATH="examples/knowledge-tuning/02_Data_Processing/Data_Processing.ipynb"
+              NB_DIR="examples/knowledge-tuning/02_Data_Processing"
+              STEP_NAME="Data Processing"
+              ;;
+            03_Knowledge_Generation)
+              NB_PATH="examples/knowledge-tuning/03_Knowledge_Generation/Knowledge_Generation.ipynb"
+              NB_DIR="examples/knowledge-tuning/03_Knowledge_Generation"
+              STEP_NAME="Knowledge Generation"
+              ;;
+            04_Knowledge_Mixing)
+              NB_PATH="examples/knowledge-tuning/04_Knowledge_Mixing/Knowledge_Mixing.ipynb"
+              NB_DIR="examples/knowledge-tuning/04_Knowledge_Mixing"
+              STEP_NAME="Knowledge Mixing"
+              ;;
+            05_Model_Training)
+              NB_PATH="examples/knowledge-tuning/05_Model_Training/Model_Training.ipynb"
+              NB_DIR="examples/knowledge-tuning/05_Model_Training"
+              STEP_NAME="Model Training"
+              ;;
+            06_Evaluation)
+              NB_PATH="examples/knowledge-tuning/06_Evaluation/Evaluation.ipynb"
+              NB_DIR="examples/knowledge-tuning/06_Evaluation"
+              STEP_NAME="Evaluation"
+              ;;
+          esac
+
+          echo "notebook_path=$NB_PATH" >> $GITHUB_OUTPUT
+          echo "notebook_dir=$NB_DIR" >> $GITHUB_OUTPUT
+          echo "step_name=$STEP_NAME" >> $GITHUB_OUTPUT
+
+          echo "📓 Notebook: $STEP_NAME"
+          echo "   Path: $NB_PATH"
+
+      - name: Compile KFP Pipeline
+        id: compile
+        run: |
+          PIPELINE="${{ github.event.inputs.pipeline || 'single-notebook' }}"
+          OUTPUT_FILE="${PIPELINE}_pipeline.yaml"
+
+          echo "🔧 Compiling $PIPELINE pipeline..."
+
+          python tests/e2e/knowledge_tuning/kfp/submit_pipeline.py \
+            --pipeline "$PIPELINE" \
+            --route "dummy" \
+            --compile-only \
+            --notebook-path "${{ steps.params.outputs.notebook_path }}" \
+            --notebook-dir "${{ steps.params.outputs.notebook_dir }}" \
+            --step-name "${{ steps.params.outputs.step_name }}" \
+            --git-branch "${{ github.event.inputs.git_branch || 'main' }}"
+
+          echo "pipeline_file=/tmp/${PIPELINE}_pipeline.yaml" >> $GITHUB_OUTPUT
+          echo "✅ Pipeline compiled"
+
+      - name: Upload compiled pipeline
+        uses: actions/upload-artifact@v4
+        with:
+          name: kfp-pipeline
+          path: /tmp/*_pipeline.yaml
+
+      - name: Submit to RHOAI Data Science Pipelines
+        id: submit
+        env:
+          OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+        run: |  # pragma: allowlist secret
+          PIPELINE="${{ github.event.inputs.pipeline || 'single-notebook' }}"
+          WAIT="${{ github.event.inputs.wait_for_completion || 'true' }}"
+
+          echo "📤 Submitting pipeline to RHOAI..."
+
+          WAIT_FLAG=""
+          if [ "$WAIT" == "true" ]; then
+            WAIT_FLAG="--wait --timeout 120"
+          fi
+
+          python tests/e2e/knowledge_tuning/kfp/submit_pipeline.py \
+            --pipeline "$PIPELINE" \
+            --route "${{ env.DSP_ROUTE }}" \
+            --token "$OPENSHIFT_TOKEN" \
+            --notebook-path "${{ steps.params.outputs.notebook_path }}" \
+            --notebook-dir "${{ steps.params.outputs.notebook_dir }}" \
+            --step-name "${{ steps.params.outputs.step_name }}" \
+            --git-branch "${{ github.event.inputs.git_branch || 'main' }}" \
+            --student-model "HuggingFaceTB/SmolLM2-135M-Instruct" \
+            --teacher-model "HuggingFaceTB/SmolLM2-135M-Instruct" \
+            $WAIT_FLAG
+
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "## KFP Pipeline Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Pipeline | ${{ github.event.inputs.pipeline || 'single-notebook' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Notebook | ${{ steps.params.outputs.step_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | ${{ github.event.inputs.git_branch || 'main' }} |" >> $GITHUB_STEP_SUMMARY
