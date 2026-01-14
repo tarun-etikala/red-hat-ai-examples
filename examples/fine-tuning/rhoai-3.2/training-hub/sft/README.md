@@ -1,6 +1,6 @@
 # SFT Fine-Tuning with Kubeflow Training on OpenShift AI
 
-This example demonstrates how to fine-tune LLMs with Training Hub and the Kubeflow Training operator on OpenShift AI.
+This example demonstrates how to fine-tune LLMs with Training Hub and the Kubeflow Trainer on OpenShift AI.
 It uses Training-Hub SFT and PyTorch FSDP to distribute the training on multiple GPUs / nodes.
 
 > [!IMPORTANT]

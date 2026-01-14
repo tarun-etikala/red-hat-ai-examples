@@ -69,7 +69,7 @@ osft(..., use_processed_dataset=True)
 
 ## General requirements to run the example notebook
 
-- An OpenShift cluster with OpenShift AI (RHOAI) installed:
+- An OpenShift cluster with OpenShift AI (RHOAI 3.2) installed:
   - The `dashboard`, `trainingoperator` and `workbenches` components enabled
 
 ## Hardware requirements to run the example notebook
