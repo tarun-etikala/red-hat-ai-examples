@@ -81,9 +81,9 @@ osft(..., use_processed_dataset=True)
 
 ### Training Job Requirements
 
-| Component | Configuration | GPU per node | Total GPU | GPU Type (per GPU) | CPU | Memory | Flash Attention |
-|-----------|--------------|---|---|------------|-----|--------|-----------------|
-| Training Pods | 2 nodes × 2 GPUs | 2 | 4 | NVIDIA L40/L40S or equivalent | 4 cores/pod | 32Gi/pod | Required |
+| Component     | Configuration    | GPU per node | Total GPU | GPU Type (per GPU)            | CPU         | Memory    | Flash Attention |
+|---------------|------------------|--------------|-----------|-------------------------------|-------------|-----------|-----------------|
+| Training Pods | 2 nodes × 2 GPUs | 2            | 4         | NVIDIA L40/L40S or equivalent | 4 cores/pod | 32Gi/pod  | Required        |
 
 > [!NOTE]
 >
@@ -94,10 +94,10 @@ osft(..., use_processed_dataset=True)
 
 ### Workbench Requirements
 
-| Image Type | Use Case | GPU | CPU | Memory | Notes |
-|------------|----------|-----|-----|--------|-------|
-| Minimal CPU Python 3.12 | CPU-based evaluation | None | 6 cores | 24Gi | Slower evaluation |
-| Minimal CUDA Python 3.12 (Example Default) | NVIDIA GPU evaluation (Example Default) | 1× GPU | 2 cores | 8Gi | Recommended for faster testing |
+| Image Type                                 | Use Case                                 | GPU    | CPU     | Memory | Notes                          |
+|--------------------------------------------|------------------------------------------|--------|---------|--------|--------------------------------|
+| Minimal CPU Python 3.12                    | CPU-based evaluation                     | None   | 6 cores | 24Gi   | Slower evaluation              |
+| Minimal CUDA Python 3.12 (Example Default) | NVIDIA GPU evaluation (Example Default)  | 1× GPU | 2 cores | 8Gi    | Recommended for faster testing |
 
 > [!NOTE]
 >
@@ -107,9 +107,9 @@ osft(..., use_processed_dataset=True)
 
 ### Storage Requirements
 
-| Purpose | Size | Access Mode | Storage Class | Notes |
-|---------|------|-------------|---------------|-------|
-| Shared Storage (PVC) total | 10Gi (Example Default) | RWX | Dynamic provisioner required | Shared between workbench and training pods |
+| Purpose                    | Size                   | Access Mode | Storage Class                | Notes                                       |
+|----------------------------|------------------------|-------------|------------------------------|---------------------------------------------|
+| Shared Storage (PVC) total | 10Gi (Example Default) | RWX         | Dynamic provisioner required | Shared between workbench and training pods  |
 
 > - Storage can be created in `Create Workbench` view on RHOAI Platform, however, dynamic RWX provisioner is required to be configured prior to creating shared file storage in RHOAI.
 

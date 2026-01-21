@@ -21,7 +21,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Ruff
-        run: pip install ruff
+        run: pip install ruff==0.14.13
 
       - name: Run Ruff linter
         run: ruff check . --output-format=github
@@ -47,7 +47,7 @@ jobs:
 
       - name: Install Gitleaks
         run: |
-          GITLEAKS_VERSION=8.29.0
+          GITLEAKS_VERSION=8.30.0
           curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz \
             | tar -xz gitleaks
           sudo mv gitleaks /usr/local/bin/gitleaks
