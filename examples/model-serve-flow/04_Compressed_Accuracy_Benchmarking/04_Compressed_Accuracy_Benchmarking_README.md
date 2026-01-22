@@ -16,7 +16,7 @@
 
 After you compress the model, use the LMEval tool (`lm_eval`) to run accuracy benchmarking on it. Evaluate the compressed model by using the same benchmark datasets and metrics that you used to evaluate the base model in Module 1. This consistency ensures a valid result when you compare the accuracy of the models so that you can quantify the impact of quantization.
 
-For details on evaluating LLMs for accuracy, see [AcEvaluate the Accuracy of the Base and Compressed Models](docs/Accuracy_Evaluation.md).
+For details on evaluating LLMs for accuracy, see [AcEvaluate the Accuracy of the Base and Compressed Models](../docs/Accuracy_Evaluation.md).
 
 ### Prerequisites
 

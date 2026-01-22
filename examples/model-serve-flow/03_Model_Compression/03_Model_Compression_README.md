@@ -28,7 +28,7 @@ Quantization provides the following benefits:
 
 The quantization scheme for this example is INT8 W8A8 (8-bit weights and 8-bit activations), specifically employing dynamic quantization of activations.
 
-For more information about compression and quantization, see [Compress a Large Language Model by using LLM Compressor](docs/Compression.md).
+For more information about compression and quantization, see [Compress a Large Language Model by using LLM Compressor](../docs/Compression.md).
 
 ### Prerequisites
 

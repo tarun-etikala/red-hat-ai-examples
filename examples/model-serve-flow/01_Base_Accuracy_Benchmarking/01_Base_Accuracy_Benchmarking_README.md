@@ -18,7 +18,7 @@ Before you compress the base model, use the LMEval tool to run accuracy benchmar
 
 The process of compressing a model can introduce rounding errors that can degrade the accuracy of a model. With accuracy benchmarking, you can confirm that the speed improvements gained from compression do not come at a significant cost to model capabilities, such as reasoning and knowledge.
 
-For details on evaluating LLMs for accuracy, see [Evaluate the Accuracy of the Base and Compressed Models](docs/Accuracy_Evaluation.md).
+For details on evaluating LLMs for accuracy, see [Evaluate the Accuracy of the Base and Compressed Models](../docs/Accuracy_Evaluation.md).
 
 ### Prerequisites
 

@@ -16,7 +16,7 @@
 
 After you compress the base model, evaluate its system-level performance by following the same procedure that you used on Module 2 to evaluate the base model. Serve the compressed model by using vLLM and benchmark it by using GuideLLM. This consistency provides system-level metrics that you can use to compare latency, throughput, and concurrency with the same base model metrics.
 
-For details on system-level performance benchmarking and GuideLLM, see [Performance Benchmarking with GuideLLM](docs/System_Level_Performance_Benchmarking.md).
+For details on system-level performance benchmarking and GuideLLM, see [Performance Benchmarking with GuideLLM](../docs/System_Level_Performance_Benchmarking.md).
 
 ### Prerequisites
 

@@ -18,7 +18,7 @@ In addition to accuracy benchmarking, you can measure the system-level inference
 
 In the following procedure, to simulate a production-like setting, you deploy the base model with vLLM, a high-throughput inference engine. You measure the inference performance of the base model under load by using the GuideLLM tool. With GuideLLM, you can generate concurrent inference traffic and collects performance metrics.
 
-For details on system-level performance benchmarking and GuideLLM, see [Performance Benchmarking with GuideLLM](docs/System_Level_Performance_Benchmarking.md).
+For details on system-level performance benchmarking and GuideLLM, see [Performance Benchmarking with GuideLLM](../docs/System_Level_Performance_Benchmarking.md).
 
 ### Prerequisites
 
