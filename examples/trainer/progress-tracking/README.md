@@ -22,8 +22,8 @@ In this example, we fine-tune the **Qwen 2.5 1.5B Instruct** model on the **Stan
 ## Requirements
 
 * An OpenShift cluster with OpenShift AI (RHOAI) 3.2 installed:
-  * The `dashboard`, `trainingoperator` and `workbenches` components enabled
-* At least 2 worker nodes with NVIDIA GPUs (Ampere-based or newer recommended)
+  * The `dashboard`, `trainer` and `workbenches` components enabled
+* At least 2 worker nodes with NVIDIA GPUs
 * A dynamic storage provisioner supporting RWX PVC provisioning
 
 ## Setup
@@ -98,7 +98,7 @@ When you use `TransformersTrainer` with `enable_progression_tracking=True` (the 
 
 Once your training job is running, you can monitor its progress directly from the OpenShift AI Dashboard:
 
-1. Navigate to **Model training** in the left sidebar to see your running jobs:
+1. Navigate to **Training Jobs** in the left sidebar to see your running jobs:
 ![](./images/training_progress.png)
 
 2. Click on a job to view detailed resource allocation and pod status:
