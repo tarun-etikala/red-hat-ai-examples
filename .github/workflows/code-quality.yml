@@ -21,7 +21,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Ruff
-        run: pip install ruff
+        run: pip install ruff==0.14.4
 
       - name: Run Ruff linter
         run: ruff check . --output-format=github
@@ -30,7 +30,7 @@ jobs:
         run: ruff format --check .
 
       - name: Run Markdownlint
-        uses: nosborn/github-action-markdown-cli@v3.3.0
+        uses: nosborn/github-action-markdown-cli@v3.4.0
         with:
           files: .
           config_file: .markdownlint.json
