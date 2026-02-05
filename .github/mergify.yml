@@ -46,3 +46,51 @@ pull_request_rules:
       label:
         remove:
           - needs-rebase
+
+  - name: mark pull requests as stale after 60 days
+    conditions:
+      - updated-at<60 days ago
+      - label!=work-in-progress
+      - label!=blocked
+      - label!=do-not-close
+      - -draft
+      - -closed
+    actions:
+      comment:
+        message: |
+          This PR has been automatically marked as stale because it has not had
+          recent activity for 60 days. It will be closed in 30 days if no further
+          activity occurs.
+
+          If this PR is still relevant, please:
+          - Rebase/merge with the latest main branch
+          - Address any review comments
+          - Add a comment to keep it active
+
+          Thank you for your contributions!
+      label:
+        add:
+          - stale
+
+  - name: close stale pull requests after 90 days
+    conditions:
+      - updated-at<90 days ago
+      - label=stale
+      - label!=work-in-progress
+      - label!=blocked
+      - label!=do-not-close
+      - -closed
+    actions:
+      close:
+        message: |
+          This PR was automatically closed due to inactivity.
+          If you'd like to continue this work, please reopen the PR or create a new one.
+
+  - name: remove stale label when PR has activity
+    conditions:
+      - label=stale
+      - -closed
+    actions:
+      label:
+        remove:
+          - stale
